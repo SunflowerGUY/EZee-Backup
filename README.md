@@ -1,8 +1,8 @@
 # EZee-Backup
 
-EZee-Backup is a portable Windows backup utility with a dark Tkinter interface and Windows `ROBOCOPY` as its backup engine.
+EZee-Backup is a lightweight Windows backup tool designed for fast, repeatable folder-to-folder operations. It uses ROBOCOPY under the hood to copy, synchronize, move, or compare directories from a simple dark-themed desktop interface.
 
-The application is designed for quick folder-to-folder backups, synchronization, moves, and comparisons without requiring Python on the target machine.
+The app is built for users who want a no-fuss way to back up important folders without needing Python installed on the target machine. It supports saved jobs, grouped job profiles, source and destination browsing, logging modes, and a portable EXE build for easy deployment.
 
 ## Screenshots
 
