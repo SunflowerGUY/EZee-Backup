@@ -30,7 +30,7 @@ The app is built for users who want a no-fuss way to back up important folders w
 
 Copies files from the source folder to the destination folder. Existing destination files are updated as needed.
 
-### Sync
+### Mirror
 
 Mirrors the source and destination using `ROBOCOPY /MIR`. This can remove destination files that no longer exist in the source, so use it carefully.
 
