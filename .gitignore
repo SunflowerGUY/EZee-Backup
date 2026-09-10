@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+*.spec.*
+
+# Local app runtime data
+*.log
+ezee_backup_jobs.json
+
+# Editor settings
+.vscode/
