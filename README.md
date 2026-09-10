@@ -4,6 +4,12 @@ EZee-Backup is a portable Windows backup utility with a dark Tkinter interface a
 
 The application is designed for quick folder-to-folder backups, synchronization, moves, and comparisons without requiring Python on the target machine.
 
+## Screenshots
+
+![EZee-Backup main window](docs/EZee-Backup-screenshot-1.jpg)
+
+![EZee-Backup job management view](docs/EZee-Backup-screenshot-2.jpg)
+
 ## Features
 
 - Portable Windows desktop app built with PyInstaller.
