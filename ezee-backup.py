@@ -1,12 +1,20 @@
 import base64
+import ctypes
+from ctypes import wintypes
+import hashlib
 import io
 import json
 import os
 import queue
+import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import tkinter as tk
@@ -15,13 +23,21 @@ from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
+from coffee_support import add_coffee_link, show_support
+
 try:
     import winsound
 except ImportError:
     winsound = None
 
-VERSION = "2.5"
+try:
+    from send2trash import send2trash
+except ImportError:
+    send2trash = None
+
+VERSION = "4.4"
 APP_NAME = "EZee-Backup"
+DRIVE_POLL_INTERVAL_MS = 60000  # slow safety-net poll; real-time detection comes from WM_DEVICECHANGE
 
 SPLASH_B64 = (
     """/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCACTAZEDAREA/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5ZoooruOcKK7zT/B2g6Vpy3fjXVrq2u5Vymk2KqbpAdpUyFshDtYnYwBxjnIK1L/avgL/AKJ5/wCVmf8Awrp+rcvxyUX2d7/gnb5nD9eUv4UJSXdWS+Tk1f1V0efUV6D/AGr4C/6J5/5WZ/8ACj+1fAX/AETz/wArM/8AhR7CH/Pxf+Tf/Ih9bq/8+ZffD/5M8+or0H+1fAX/AETz/wArM/8AhR/avgL/AKJ5/wCVmf8Awo9hD/n4v/Jv/kQ+t1f+fMvvh/8AJnn1Feg/2r4C/wCief8AlZn/AMKP7V8Bf9E8/wDKzP8A4Uewh/z8X/k3/wAiH1ur/wA+ZffD/wCTPPqK9B/tXwF/0Tz/AMrM/wDhR/avgL/onn/lZn/wo9hD/n4v/Jv/AJEPrdX/AJ8y++H/AMmefUV6D/avgL/onn/lZn/wo/tXwF/0Tz/ysz/4Uewh/wA/F/5N/wDIh9bq/wDPmX3w/wDkzz6ivQf7V8Bf9E8/8rM/+FH9q+Av+ief+Vmf/Cj2EP8An4v/ACb/AORD63V/58y++H/yZ59RXoP9q+Av+ief+Vmf/Cj+1fAX/RPP/KzP/hR7CH/Pxf8Ak3/yIfW6v/PmX3w/+TPPqK9B/tXwF/0Tz/ysz/4Uf2r4C/6J5/5WZ/8ACj2EP+fi/wDJv/kQ+t1f+fMvvh/8mefUV6D/AGr4C/6J5/5WZ/8ACj+1fAX/AETz/wArM/8AhR7CH/Pxf+Tf/Ih9bq/8+ZffD/5M8+or0H+1fAX/AETz/wArM/8AhR/avgL/AKJ5/wCVmf8Awo9hD/n4v/Jv/kQ+t1f+fMvvh/8AJnn1Feg/2r4C/wCief8AlZn/AMKP7V8Bf9E8/wDKzP8A4Uewh/z8X/k3/wAiH1ur/wA+ZffD/wCTPPqK9B/tXwF/0Tz/AMrM/wDhR/avgL/onn/lZn/wo9hD/n4v/Jv/kQ+t1f+fMvvh/8AJnn1Feg/2r4C/wCief8AlZn/AMKP7V8Bf9E8/wDKzP8A4Uewh/z8X/k3/wAiH1ur/wA+ZffD/wCTPPqK9B/tXwF/0Tz/AMrM/wDhR/avgL/onn/lZn/wo/tXwF/0Tz/ysz/4Uewh/wA/F/5N/wDIh9bq/wDPmX3w/wDkzz6ivQf7V8Bf9E8/8rM/+FH9q+Av+ief+Vmf/Cj2EP8An4v/ACb/AORD63V/58y++H/yZ59RXoP9q+Av+ief+Vmf/Cj+1fAX/RPP/KzP/hR7CH/Pxf8Ak3/yIfW6v/PmX3w/+TPPqK9B/tXwF/0Tz/ysz/4Uf2r4C/6J5/5WZ/8ACj2EP+fi/wDJv/kQ+t1f+fMvvh/8mefUV6D/AGr4C/6J5/5WZ/8ACj+1fAX/AETz/wArM/8AhR7CH/Pxf+Tf/Ih9bq/8+ZffD/5M8+or0H+1fAX/AETz/wArM/8AhR/avgL/AKJ5/wCVmf8Awo9hD/n4v/Jv/kQ+t1f+fMvvh/8AJnn1Feg/2r4C/wCief8AlZn/AMKP7V8Bf9E8/wDKzP8A4Uewh/z8X/k3/wAiH1ur/wA+ZffD/wCTPPqK9B/tXwF/0Tz/AMrM/wDhRJ4X8KeIbV38L6lPp2rHLLpeoOpSViVxHFLwOpKruyzYGdoyaaw3N8E0321X5pA8dya1acoru7NfPlbt6vQ8+op9xDLbzyQTxPFNGxSSN1KsjA4IIPIIPamVzHcncK7z4fWdlpXhfUfGt2iTXcE4s9JQ8hLkruMpUqQSqkMueMqeh2muDr0HW/8Akl3gr/t//wDR4row3u80+sVdet0vwvc4cd7yhS6SlZ+iTk187Wfkzmp5ZZ5nnkeWWRi7u7EszE5JJPUmmUUVznYlYKKKKQBRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAdV4hgt/E3w/k8RyN/xPNHkjhv5WY5uoHO2N2+XBcHC5znCksT8orzyvRPh3/qPFX/YuXn8lrzuuqu+aMJvdrX5dTjwa9nOpSWyd15Jrb0Tvby06BXoOt/8ku8Ff9v/AP6PFefV6Drf/JLvBX/b/wD+jxSofBU9P/bohi/4tH/E/wD0iZy9FFFcx2BRRRQAUUUUAFFFFABV7w+LFtbs01Jc2TzKk53EbUJwW49M5/CqNFNOzE1dWO1g8Hxf2Qpv547G4hncXMjSRg4Z2jjQCSRF6wTsec4K8EVUtvCtmQgutdiid9RurJCkatG/kIjFg7Oo+beFUHAJIyQDkZzeKNce/mvZbtJpplRZPNt43Rtn3TsZSu4f3sZySc5JzBDruqxNGwuy5jmmnHmIr7nmVVlLbgdwYKoIOR+ZrVyp9jnUK3839fd3Ny48JQwWct1Peyw29rJP57GzYTBUFtt+RnAJLXKjGQBgncwxUkfgu18ywhl1pll1K9FrZKtpuD7ooJI3c7xsBFwgIGSPesZvFGts6s92jAF/3ZtzHhkjQqU27Su2KMBcYGwYAqNvEWstd2t2bwma0uzeQN5a/JKfLGQMYxiKMBegC8DrRzU+wKFe3xf19xY8Hwabd3F9bX1k1xIbC6lgfzSqxNHbyyBsD7x3IuMnHXIOeL/AIT0rTbq20pLy0FxJq+qPYeYZGU2yhYvnUAgE5mz82RhOnNc1Y3dxZTNNayeXI0UkJO0H5JEZHHPqrMPx4q5Za9qlnE8VtPHGjgcCCP5SE2blO35W28FlwT1JJpRlFboupCbb5WZlFFFZGwUUUUAFFFFABRRRQAUUUUAdX8O/wDUeKv+xcvP5LXndeifDv8A1Hir/sXLz+S153XTV/gw+f5nHh/95q/9u/kFeg63/wAku8Ff9v8A/wCjxXn1eg63/wAku8Ff9v8A/wCjxRQ+Cp6f+3RDF/xaP+J/+kTOXooormOwKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA6v4d/wCo8Vf9i5efyWvO69E+Hf8AqPFX/YuXn8lrzuumr/Bh8/zOPD/7zV/7d/IK9B1v/kl3gr/t/wD/AEeK8+r0HW/+SXeCv+3/AP8AR4oofBU9P/bohi/4tH/E/wD0iZy9FFFcx2BRRRQAUUUUAFFFFABXRa/oui6QbW3k1fUJbyW1tLqVF09BGizwxzEK/nZYqsmOVGSO1c7XZ6x4ys9WttMt7+z1uW2s4rOGSz/tn/RZFgiSNtsflfIXVCc5O0sTzQMqap4VgVNOGjX9xdzXdu91LHeQR2gt4cgI7uZWUBucbivGw87xVSLwj4gluZbZbJBKjhFVrmJfOZlDKsWW/ekqykBN2Qy46jOzH43trbxBfatYWOrWz6jA9vdlNUVZFQtG6CF0hXygpjUYww2/LgCrVv8AEy9jaYmPVQouvtNv5Wsyoxbyo4sTtjdMMRRngpzuxgHAWoHM+GNIs9Ti1a5v76ezttNshdO0FsJnfM8UIUKXQdZgc57Ve1nwTqtqzz6eo1Gx2wvFIhRZXWXYFzDuLjDyLG2AQHyuSaXwn4xvdGa8F1catcJPp4sYGttRMEtqomil/duVfaP3W0qAOGNdNc/FuZ2e6i0d11ApbJ573gZZWguIZklmXywZJSIFRn3AEcgDnJqBy8PgndfH8V3Qx2RxOHudx/C5ijAztlatJdS9W4s2f7RJG5raXb+X7goZ8VvJ7OAr9u+j2YBz3pMqiI0U2xHvJHGDdOdo+MyaAo3Dyl5E3syK9E7+Ka2sPcyH5iW0tn6Y0ZX0t7I2yWdr6Dce0MkrgOm3z5hP4/kQdXJ1wV3sXfU3ysFx7K0OBn3d8VV+oVn7j6inrY8D9dw4m4S1ldF3+6SNGp1Dl+5i3o/ZmraV+Rj61xA8QG2B69WAJjGmyrR/""")
@@ -51,33 +67,442 @@ def job_file_path(base_dir: Path | None = None) -> Path:
     return target_dir / "ezee_backup_jobs.json"
 
 
-def load_jobs(path: str | Path | None = None) -> list:
-    target = Path(path) if path is not None else job_file_path()
-    if not target.exists():
-        return []
-    try:
-        with target.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        if isinstance(data, list):
-            jobs = data
-        elif isinstance(data, dict) and isinstance(data.get("jobs"), list):
-            jobs = data["jobs"]
-        else:
-            return []
+# --- JOB file integrity ----------------------------------------------------
+# Every save writes the JOB file atomically, verifies it, then writes an
+# identical safety copy beside it. Every load checks the main file and falls
+# back to the safety copy if the main file is missing or corrupted. Each event
+# is recorded (with size, job count and SHA-256) in an integrity log, so any
+# copy can later be checked against the last known-good fingerprint.
+# Between saves, the JOB file and its safety copy are kept read-only: a save
+# switches read-only off, writes, then switches it straight back on.
+# Dated older copies are kept in a history folder, so an earlier version can be
+# recovered after a save that was valid but wrong (e.g. jobs deleted by mistake).
 
-        migrated = False
-        for job in jobs:
-            if "include_subfolders" not in job:
-                job["include_subfolders"] = True
-                migrated = True
-        if migrated:
+INTEGRITY_LOG_MAX_BYTES = 512 * 1024
+HISTORY_KEEP_RECENT = 20  # Always keep this many of the newest dated copies...
+HISTORY_KEEP_DAYS = 30  # ...plus the newest copy from each day within this many days
+HISTORY_STAMP_FORMAT = "%Y-%m-%d_%H-%M-%S"
+INTEGRITY_LOG_HEADER = (
+    "# EZee-Backup JOB file integrity log\n"
+    "# Each line: timestamp | event | file | details (size, jobs, groups, sha256).\n"
+    "# To check a copy, compare its SHA-256 with the latest 'SAVE OK' or 'LOAD OK' line, e.g. in PowerShell:\n"
+    "#   Get-FileHash 'ezee_backup_jobs.safety.json' -Algorithm SHA256\n"
+)
+
+
+def safety_copy_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.safety{path.suffix}")
+
+
+def appdata_copy_path(path: Path) -> Path | None:
+    """Second safety copy, outside the app folder: %APPDATA%\\EZee-Backup\\<folder>-<id>\\.
+
+    Each app folder gets its own sub-folder (keyed by its full path), so separate
+    installs never share or overwrite each other's copies.
+    """
+    base = os.environ.get("APPDATA")
+    if not base:
+        return None
+    folder = Path(path).resolve().parent
+    key = hashlib.sha256(str(folder).lower().encode("utf-8")).hexdigest()[:8]
+    label = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in (folder.name or "drive")).strip() or "drive"
+    return Path(base) / APP_NAME / f"{label}-{key}" / safety_copy_path(Path(path)).name
+
+
+def safety_copies(path: Path) -> list[tuple[str, str, Path]]:
+    """(description, log event prefix, path) for each safety copy of a JOB file."""
+    copies = [("safety copy", "SAFETY", safety_copy_path(path))]
+    second = appdata_copy_path(path)
+    if second is not None:
+        copies.append(("AppData safety copy", "APPDATA", second))
+    return copies
+
+
+def integrity_log_path(path: Path) -> Path:
+    """Integrity log for a JOB file. A safety copy shares its main file's log."""
+    stem = path.stem.removesuffix(".safety")
+    return path.with_name(f"{stem}_integrity.log")
+
+
+def log_integrity_event(path: Path, event: str, details: str = "", subject: Path | None = None) -> None:
+    """Append one line to the integrity log beside `path`. Never raises: logging must not break saving or loading.
+
+    `subject` is the file the event is about, when that is not `path` itself (shown in full if it lives elsewhere).
+    """
+    log_path = integrity_log_path(path)
+    if subject is None:
+        file_label = path.name
+    else:
+        file_label = subject.name if subject.parent == path.parent else str(subject)
+    try:
+        if log_path.exists() and log_path.stat().st_size > INTEGRITY_LOG_MAX_BYTES:
+            os.replace(log_path, log_path.with_name(log_path.name + ".1"))
+        is_new = not log_path.exists()
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with log_path.open("a", encoding="utf-8") as handle:
+            if is_new:
+                handle.write(INTEGRITY_LOG_HEADER)
+            parts = [stamp, f"{event:<15}", file_label] + ([details] if details else [])
+            handle.write(" | ".join(parts) + "\n")
+    except OSError:
+        pass
+
+
+def parse_jobs_document(raw: bytes) -> list:
+    """Return the job list from a JOB file's bytes, or raise ValueError describing what is wrong."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"not valid JSON ({exc})") from None
+    if isinstance(data, list):
+        jobs = data
+    elif isinstance(data, dict) and isinstance(data.get("jobs"), list):
+        jobs = data["jobs"]
+    else:
+        raise ValueError("no 'jobs' list found")
+    if not all(isinstance(job, dict) for job in jobs):
+        raise ValueError("'jobs' contains entries that are not job profiles")
+    return jobs
+
+
+def describe_jobs_file(raw: bytes, jobs: list) -> str:
+    groups = {str(job.get("group", "")).strip() for job in jobs} - {""}
+    sha = hashlib.sha256(raw).hexdigest()
+    return f"size={len(raw)} bytes | jobs={len(jobs)} | groups={len(groups)} | sha256={sha}"
+
+
+def read_jobs_file(path: Path) -> tuple[list | None, bytes | None, str]:
+    """Read and validate a JOB file. Returns (jobs, raw_bytes, problem); jobs is None if unusable."""
+    if not path.exists():
+        return None, None, "missing"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return None, None, f"unreadable ({exc})"
+    try:
+        return parse_jobs_document(raw), raw, ""
+    except ValueError as exc:
+        return None, raw, f"corrupted: {exc}"
+
+
+def is_read_only(path: Path) -> bool:
+    return not (path.stat().st_mode & stat.S_IWRITE)
+
+
+def set_read_only(path: Path, read_only: bool) -> None:
+    os.chmod(path, stat.S_IREAD if read_only else stat.S_IREAD | stat.S_IWRITE)
+
+
+def protect_file(path: Path, log_beside: Path | None = None) -> None:
+    """Switch read-only on for a JOB file, logging if it had been switched off. Never raises."""
+    log_target = log_beside or path
+    try:
+        if path.exists() and not is_read_only(path):
+            set_read_only(path, True)
+            log_integrity_event(log_target, "PROTECTED", "read-only switched back on", subject=path)
+    except OSError as exc:
+        log_integrity_event(log_target, "PROTECT FAILED", f"could not switch on read-only ({exc})", subject=path)
+
+
+def write_file_atomically(path: Path, raw: bytes, log_beside: Path | None = None) -> None:
+    """Write to a temp file in the same folder, flush to disk, then swap it into place.
+
+    The finished file is left read-only. If the existing file is read-only, that is
+    switched off just for the swap (and restored if the swap fails).
+    """
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    unlocked = False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists() and is_read_only(path):
             try:
-                save_jobs(jobs, target)
+                set_read_only(path, False)
+            except OSError as exc:
+                raise OSError(f"could not switch off read-only on {path.name} ({exc})") from exc
+            unlocked = True
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.remove(temp_name)
+        except OSError:
+            pass
+        if unlocked:
+            try:
+                set_read_only(path, True)  # Put the old file's protection back
             except OSError:
                 pass
-        return jobs
-    except (json.JSONDecodeError, OSError):
+        raise
+    try:
+        set_read_only(path, True)
+    except OSError as exc:
+        log_integrity_event(log_beside or path, "PROTECT FAILED", f"saved, but could not switch on read-only ({exc})", subject=path)
+
+
+def write_safety_copy(target: Path, copy: Path, prefix: str, raw: bytes, event: str, details: str) -> bool:
+    """Write and verify one safety copy of the JOB file. Logs the outcome; never raises."""
+    try:
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        write_file_atomically(copy, raw, log_beside=target)
+        if copy.read_bytes() != raw:
+            raise OSError("did not read back identically after writing")
+        if copy.parent != target.parent:
+            # Note which app folder this copy belongs to, for anyone browsing %APPDATA%.
+            (copy.parent / "copy_of.txt").write_text(
+                f"Safety copy of the EZee-Backup JOB file:\n{target.resolve()}\n", encoding="utf-8"
+            )
+    except OSError as exc:
+        log_integrity_event(target, f"{prefix} FAILED", str(exc), subject=copy)
+        return False
+    log_integrity_event(target, f"{prefix} {event}", details, subject=copy)
+    return True
+
+
+def refresh_safety_copies(target: Path, raw: bytes, jobs: list) -> None:
+    """Bring every safety copy in line with a known-good JOB file, then make sure all are read-only."""
+    for _label, prefix, copy in safety_copies(target):
+        copy_jobs, copy_raw, copy_problem = read_jobs_file(copy)
+        if not jobs and copy_jobs:
+            # An empty main file must not wipe out a safety copy that still holds profiles.
+            log_integrity_event(
+                target, f"{prefix} KEPT",
+                f"main file has no jobs; copy left untouched | {describe_jobs_file(copy_raw, copy_jobs)}",
+                subject=copy,
+            )
+        elif copy_raw != raw:
+            reason = copy_problem or "differs from main file"
+            write_safety_copy(target, copy, prefix, raw, "REFRESH", f"was {reason} | {describe_jobs_file(raw, jobs)}")
+        protect_file(copy, log_beside=target)
+    # Re-apply read-only if it was cleared (crash mid-save, manual change, or older files).
+    protect_file(target)
+
+
+def history_dir(path: Path) -> Path:
+    """Folder for dated copies: beside the AppData safety copy, or beside the JOB file if AppData is unavailable."""
+    second = appdata_copy_path(path)
+    if second is not None:
+        return second.parent / "history"
+    return path.with_name(f"{path.stem}_history")
+
+
+def history_files(path: Path) -> list[tuple[datetime, Path]]:
+    """Dated copies of a JOB file, newest first."""
+    folder = history_dir(path)
+    if not folder.is_dir():
         return []
+    pattern = re.compile(rf"^{re.escape(path.stem)}_(\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}-\d{{2}}-\d{{2}})(?:_(\d+))?{re.escape(path.suffix)}$")
+    found = []
+    for candidate in folder.iterdir():
+        match = pattern.match(candidate.name)
+        if match:
+            stamp = datetime.strptime(match.group(1), HISTORY_STAMP_FORMAT)
+            found.append((stamp, int(match.group(2) or 0), candidate))
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [(stamp, candidate) for stamp, _n, candidate in found]
+
+
+def save_history_copy(target: Path, raw: bytes, jobs: list, now: datetime | None = None) -> None:
+    """Add a dated copy of the JOB file (unless the newest one is identical), then prune old ones. Never raises."""
+    now = now or datetime.now()
+    try:
+        existing = history_files(target)
+        if existing and existing[0][1].read_bytes() == raw:
+            return
+        folder = history_dir(target)
+        folder.mkdir(parents=True, exist_ok=True)
+        base = f"{target.stem}_{now.strftime(HISTORY_STAMP_FORMAT)}"
+        copy = folder / f"{base}{target.suffix}"
+        counter = 1
+        while copy.exists():  # More than one save in the same second
+            counter += 1
+            copy = folder / f"{base}_{counter}{target.suffix}"
+        write_file_atomically(copy, raw, log_beside=target)
+    except OSError as exc:
+        log_integrity_event(target, "HISTORY FAILED", str(exc), subject=history_dir(target))
+        return
+    log_integrity_event(target, "HISTORY OK", describe_jobs_file(raw, jobs), subject=copy)
+    prune_history(target, now)
+
+
+def summarize_job_changes(current_jobs: list, older_jobs: list) -> str:
+    """Plain-English summary of what restoring `older_jobs` would change, compared with `current_jobs`."""
+    current = {str(job.get("name", "Untitled")): job for job in current_jobs}
+    older = {str(job.get("name", "Untitled")): job for job in older_jobs}
+    brings_back = [name for name in older if name not in current]
+    removes = [name for name in current if name not in older]
+    changed = [name for name in older if name in current and older[name] != current[name]]
+
+    def listed(names):
+        shown = ", ".join(names[:3])
+        return shown + (f" +{len(names) - 3} more" if len(names) > 3 else "")
+
+    parts = []
+    if brings_back:
+        parts.append(f"Brings back: {listed(brings_back)}")
+    if removes:
+        parts.append(f"Removes: {listed(removes)}")
+    if changed:
+        parts.append(f"Changes {len(changed)} job{'s' if len(changed) != 1 else ''}")
+    return " | ".join(parts) if parts else "Same jobs as now (order or groups may differ)"
+
+
+def replace_jobs_from_file(target: Path, source: Path, event: str, description: str) -> list:
+    """Make another JOB file's contents the current JOB file.
+
+    The current version is kept as a dated copy first, so the change can be undone with Restore Older
+    Version. The new contents are saved like any other change (safety copies, dated copy, read-only).
+    Returns the new jobs. Raises ValueError if `source` is unusable, OSError if saving fails.
+    """
+    new_jobs, new_raw, problem = read_jobs_file(source)
+    if new_jobs is None:
+        raise ValueError(f"{source.name} is {problem}.")
+    current_jobs, current_raw, _problem = read_jobs_file(target)
+    if current_jobs is not None:
+        save_history_copy(target, current_raw, current_jobs)  # No-op if the newest dated copy already matches
+    for job in new_jobs:
+        job.setdefault("include_subfolders", True)
+    save_jobs(new_jobs, target)
+    log_integrity_event(target, event, f"from {description} | {describe_jobs_file(new_raw, new_jobs)}")
+    return new_jobs
+
+
+def restore_history_copy(target: Path, dated: Path) -> list:
+    """Make a dated copy the current JOB file (Edit > Restore Master Jobs Profile from History)."""
+    return replace_jobs_from_file(target, dated, "RESTORED", f"dated copy {dated.name}")
+
+
+def import_job_file(target: Path, source: Path) -> list:
+    """Make a JOB file from anywhere, under any name, the current JOB file (File > Import Master Jobs Profile)."""
+    return replace_jobs_from_file(target, Path(source), "IMPORTED", str(Path(source).resolve()))
+
+
+def prune_history(target: Path, now: datetime | None = None) -> None:
+    """Keep the newest HISTORY_KEEP_RECENT copies plus the newest copy of each day in the last HISTORY_KEEP_DAYS days."""
+    now = now or datetime.now()
+    files = history_files(target)
+    keep = {copy for _stamp, copy in files[:HISTORY_KEEP_RECENT]}
+    cutoff = now - timedelta(days=HISTORY_KEEP_DAYS)
+    days_kept = set()
+    for stamp, copy in files:  # Newest first, so the first copy seen for each day is that day's newest
+        if stamp >= cutoff and stamp.date() not in days_kept:
+            keep.add(copy)
+            days_kept.add(stamp.date())
+    removed = 0
+    for _stamp, copy in files:
+        if copy in keep:
+            continue
+        try:
+            set_read_only(copy, False)
+            copy.unlink()
+            removed += 1
+        except OSError as exc:
+            log_integrity_event(target, "HISTORY FAILED", f"could not remove old copy ({exc})", subject=copy)
+    if removed:
+        log_integrity_event(target, "HISTORY PRUNED", f"removed {removed} old dated cop{'y' if removed == 1 else 'ies'}")
+
+
+def quarantine_corrupt_file(path: Path) -> Path | None:
+    """Keep a damaged JOB file for inspection instead of overwriting it. Returns where it was moved."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    destination = path.with_name(f"{path.stem}.corrupt-{stamp}{path.suffix}")
+    try:
+        os.replace(path, destination)
+        return destination
+    except OSError:
+        return None
+
+
+def load_jobs_with_report(path: str | Path | None = None) -> tuple[list, str | None]:
+    """Load the JOB file, recovering from a safety copy if needed.
+
+    Safety copies are tried in order: the one beside the JOB file, then the one in %APPDATA%.
+    Returns (jobs, notice). notice is None when all is well, otherwise a message for the user.
+    """
+    target = Path(path) if path is not None else job_file_path()
+    notice = None
+
+    jobs, raw, problem = read_jobs_file(target)
+    if jobs is not None:
+        log_integrity_event(target, "LOAD OK", describe_jobs_file(raw, jobs))
+        refresh_safety_copies(target, raw, jobs)
+        save_history_copy(target, raw, jobs)  # No-op if the newest dated copy already matches
+    else:
+        copies = [(label, prefix, copy, *read_jobs_file(copy)) for label, prefix, copy in safety_copies(target)]
+        if (
+            problem == "missing"
+            and all(copy_problem == "missing" for *_, copy_problem in copies)
+            and not history_files(target)
+        ):
+            log_integrity_event(target, "NO FILE", "no JOB file or safety copies yet (first run)")
+            return [], None
+
+        log_integrity_event(target, "LOAD FAILED", problem)
+        kept = quarantine_corrupt_file(target) if raw is not None else None
+        if kept:
+            log_integrity_event(target, "QUARANTINED", f"damaged file kept as {kept.name}")
+
+        # Keep any damaged safety copies for inspection before they are rebuilt.
+        for _label, _prefix, copy, copy_jobs, copy_raw, _problem in copies:
+            if copy_jobs is None and copy_raw is not None:
+                kept_copy = quarantine_corrupt_file(copy)
+                if kept_copy:
+                    log_integrity_event(target, "QUARANTINED", f"damaged file kept as {kept_copy.name}", subject=copy)
+
+        usable = next((entry for entry in copies if entry[3] is not None), None)
+        if usable is None:
+            # Last resort: the newest dated copy that is still valid.
+            for stamp, dated in history_files(target):
+                dated_jobs, dated_raw, dated_problem = read_jobs_file(dated)
+                if dated_jobs is not None:
+                    label = f"dated copy from {stamp.strftime('%d %B %Y at %H:%M:%S')}"
+                    usable = (label, "HISTORY", dated, dated_jobs, dated_raw, "")
+                    break
+        if usable is None:
+            for label, _prefix, copy, _jobs, _raw, copy_problem in copies:
+                log_integrity_event(target, "NO RECOVERY", f"{label} {copy_problem}", subject=copy)
+            states = "; ".join(f"{label} {copy_problem}" for label, *_, copy_problem in copies)
+            notice = (
+                f"The JOB file is {problem}, and no usable safety copy or dated copy was found "
+                f"({states}).\n\nStarting with an empty job list."
+            )
+            if kept:
+                notice += f"\n\nThe damaged file was kept as:\n{kept}"
+            return [], notice
+
+        label, _prefix, source_copy, jobs, recovered_raw, _problem = usable
+        try:
+            write_file_atomically(target, recovered_raw)
+            log_integrity_event(
+                target, "RECOVERED",
+                f"restored from {label} {source_copy} | {describe_jobs_file(recovered_raw, jobs)}",
+            )
+            refresh_safety_copies(target, recovered_raw, jobs)
+        except OSError as exc:
+            log_integrity_event(target, "RESTORE FAILED", f"loaded {label} but could not rewrite main file ({exc})")
+        notice = (
+            f"The JOB file was {problem}.\n\n"
+            f"Your {len(jobs)} job profile(s) were recovered from the {label}:\n{source_copy}"
+        )
+        if kept:
+            notice += f"\n\nThe damaged file was kept as:\n{kept}"
+
+    migrated = False
+    for job in jobs:
+        if "include_subfolders" not in job:
+            job["include_subfolders"] = True
+            migrated = True
+    if migrated:
+        try:
+            save_jobs(jobs, target)
+        except OSError:
+            pass
+    return jobs, notice
+
+
+def load_jobs(path: str | Path | None = None) -> list:
+    return load_jobs_with_report(path)[0]
 
 
 def save_jobs(jobs: list, path: str | Path | None = None) -> Path:
@@ -89,8 +514,22 @@ def save_jobs(jobs: list, path: str | Path | None = None) -> Path:
         if group:
             groups.setdefault(group, []).append(job.get("name", "Untitled"))
     data = {"version": 2, "groups": groups, "jobs": jobs}
-    with target.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
+    raw = json.dumps(data, indent=2).encode("utf-8")
+    try:
+        parse_jobs_document(raw)  # Never write something we could not read back
+        write_file_atomically(target, raw)
+        if target.read_bytes() != raw:
+            raise OSError("JOB file did not read back identically after writing")
+    except (OSError, ValueError) as exc:
+        log_integrity_event(target, "SAVE FAILED", str(exc))
+        raise
+    details = describe_jobs_file(raw, jobs)
+    log_integrity_event(target, "SAVE OK", details)
+
+    # The main file is already safely saved; a failed safety copy is logged rather than failing the save.
+    for _label, prefix, copy in safety_copies(target):
+        write_safety_copy(target, copy, prefix, raw, "OK", details)
+    save_history_copy(target, raw, jobs)
     return target
 
 
@@ -120,9 +559,98 @@ def has_valid_folder_pair(source: str, destination: str) -> bool:
     return bool(str(source).strip()) and bool(str(destination).strip())
 
 
+def extract_drive_letter(path: str) -> str | None:
+    candidate = str(path).strip()
+    if len(candidate) >= 2 and candidate[1] == ":" and candidate[0].isalpha():
+        return candidate[:2].upper()
+    return None
+
+
+def collect_drive_letters(jobs: list) -> set:
+    drives = set()
+    for job in jobs:
+        for key in ("source", "destination"):
+            drive = extract_drive_letter(job.get(key, ""))
+            if drive:
+                drives.add(drive)
+    return drives
+
+
+def is_drive_online(drive_letter: str) -> bool:
+    return os.path.exists(f"{drive_letter}\\")
+
+
+# --- Windows WM_DEVICECHANGE plumbing -------------------------------------
+# Lets the app learn about a drive arriving/departing the instant Windows
+# broadcasts it, instead of relying solely on the periodic poll.
+
+WM_DEVICECHANGE = 0x0219
+DBT_DEVICEARRIVAL = 0x8000
+DBT_DEVICEREMOVECOMPLETE = 0x8004
+DBT_DEVTYP_VOLUME = 2
+GWLP_WNDPROC = -4
+
+WNDPROCTYPE = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM
+)
+
+_user32 = ctypes.windll.user32
+_user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+_user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+_user32.CallWindowProcW.restype = ctypes.c_ssize_t
+_user32.CallWindowProcW.argtypes = [
+    ctypes.c_void_p, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM,
+]
+
+
+class DEV_BROADCAST_HDR(ctypes.Structure):
+    _fields_ = [
+        ("dbch_size", wintypes.DWORD),
+        ("dbch_devicetype", wintypes.DWORD),
+        ("dbch_reserved", wintypes.DWORD),
+    ]
+
+
+class DEV_BROADCAST_VOLUME(ctypes.Structure):
+    _fields_ = [
+        ("dbcv_size", wintypes.DWORD),
+        ("dbcv_devicetype", wintypes.DWORD),
+        ("dbcv_reserved", wintypes.DWORD),
+        ("dbcv_unitmask", wintypes.DWORD),
+        ("dbcv_flags", wintypes.WORD),
+    ]
+
+
+def unitmask_to_drive_letters(unitmask: int) -> list:
+    return [f"{chr(ord('A') + i)}:" for i in range(26) if unitmask & (1 << i)]
+
+
+def paths_are_accessible(source: str, destination: str) -> tuple[bool, str]:
+    source = str(source).strip()
+    destination = str(destination).strip()
+    source_drive = extract_drive_letter(source)
+    if source_drive and not is_drive_online(source_drive):
+        return False, f"Source drive {source_drive} is offline or disconnected."
+    if not os.path.isdir(source):
+        return False, f"Source folder is not accessible: {source}"
+    dest_drive = extract_drive_letter(destination)
+    if dest_drive and not is_drive_online(dest_drive):
+        return False, f"Destination drive {dest_drive} is offline or disconnected."
+    return True, ""
+
+
 def folder_dialog_initialdir(folder: str) -> str | None:
-    candidate = str(folder).strip()
-    return candidate if candidate and os.path.isdir(candidate) else None
+    """Folder the Browse dialog should open at: the text-box path, or its nearest existing parent."""
+    candidate = str(folder).strip().strip('"')
+    if not candidate:
+        return None
+    candidate = os.path.normpath(candidate)
+    while not os.path.isdir(candidate):
+        parent = os.path.dirname(candidate)
+        if not parent or parent == candidate:
+            return None  # Nothing on this path exists (e.g. drive not connected)
+        candidate = parent
+    return candidate
 
 
 def icon_key_for_filename(filename: str) -> str:
@@ -182,12 +710,297 @@ def play_error_sound():
     threading.Thread(target=sound, daemon=True).start()
 
 
+def play_standard_alert_beep():
+    """Lighter nudge than play_error_sound(), used as a repeat reminder
+    rather than a fresh-event alert."""
+    if winsound is None:
+        return
+
+    def beep():
+        try:
+            sound_path = bundled_asset_path("EZ-short-alert1.wav")
+            if sound_path.exists():
+                winsound.PlaySound(str(sound_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            else:
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+        except (RuntimeError, OSError):
+            try:
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+            except (RuntimeError, OSError):
+                pass
+
+    threading.Thread(target=beep, daemon=True).start()
+
+
 def jobs_for_sidebar_selection(jobs: list, kind: str, value: str) -> list:
     if kind == "job":
         return [jobs[int(value)]]
     if kind == "group":
         return [job for job in jobs if str(job.get("group", "")).strip() == value]
     return []
+
+
+# --- Two-way Sync mode -----------------------------------------------------
+# Robocopy has no bidirectional mode, so Sync is implemented as a custom
+# Python engine that remembers each folder pair's state from the last
+# successful sync (a "manifest") so it can tell a genuine deletion apart
+# from a file that simply hasn't reached the other side yet.
+
+def sync_state_dir(base_dir: Path | None = None) -> Path:
+    target_dir = Path(base_dir) if base_dir is not None else exe_dir()
+    return target_dir / "sync_state"
+
+
+def sync_pair_key(source: str, destination: str) -> str:
+    def normalize(path: str) -> str:
+        return os.path.normcase(os.path.normpath(str(path).strip()))
+
+    digest = hashlib.sha1(f"{normalize(source)}|{normalize(destination)}".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def sync_manifest_path(source: str, destination: str, base_dir: Path | None = None) -> Path:
+    return sync_state_dir(base_dir) / f"{sync_pair_key(source, destination)}.json"
+
+
+def load_sync_manifest(source: str, destination: str, base_dir: Path | None = None) -> dict:
+    target = sync_manifest_path(source, destination, base_dir)
+    if not target.exists():
+        return {}
+    try:
+        with target.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        entries = data.get("entries")
+        return entries if isinstance(entries, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_sync_manifest(source: str, destination: str, entries: dict, base_dir: Path | None = None) -> Path:
+    target = sync_manifest_path(source, destination, base_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "version": 1,
+        "source": str(source),
+        "destination": str(destination),
+        "generated": date.today().isoformat(),
+        "entries": entries,
+    }
+    with target.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+    return target
+
+
+def scan_folder_snapshot(root: Path, include_subfolders: bool) -> dict:
+    root = Path(root)
+    snapshot = {}
+    if not root.exists():
+        return snapshot
+    if include_subfolders:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                full_path = Path(dirpath) / filename
+                try:
+                    stat = full_path.stat()
+                except OSError:
+                    continue
+                relative = full_path.relative_to(root).as_posix()
+                snapshot[relative] = (stat.st_size, stat.st_mtime)
+    else:
+        try:
+            entries = os.scandir(root)
+        except OSError:
+            return snapshot
+        with entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    continue
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                snapshot[entry.name] = (stat.st_size, stat.st_mtime)
+    return snapshot
+
+
+def classify_sync_entries(
+    source_entries: dict,
+    dest_entries: dict,
+    manifest_entries: dict,
+    mtime_tolerance: float = 2.0,
+) -> dict:
+    def sizes_and_times_match(a, b) -> bool:
+        return a[0] == b[0] and abs(a[1] - b[1]) <= mtime_tolerance
+
+    actions = {}
+    all_paths = set(source_entries) | set(dest_entries) | set(manifest_entries)
+    for relative_path in all_paths:
+        in_source = relative_path in source_entries
+        in_dest = relative_path in dest_entries
+        in_manifest = relative_path in manifest_entries
+
+        if not in_manifest:
+            if in_source and in_dest:
+                if sizes_and_times_match(source_entries[relative_path], dest_entries[relative_path]):
+                    actions[relative_path] = "noop"
+                else:
+                    actions[relative_path] = "conflict"
+            elif in_source:
+                actions[relative_path] = "copy_src_to_dest"
+            elif in_dest:
+                actions[relative_path] = "copy_dest_to_src"
+            continue
+
+        if not in_source and not in_dest:
+            actions[relative_path] = "noop"
+            continue
+        if in_source and not in_dest:
+            actions[relative_path] = "delete_src"
+            continue
+        if in_dest and not in_source:
+            actions[relative_path] = "delete_dest"
+            continue
+
+        manifest_value = manifest_entries[relative_path]
+        manifest_tuple = (manifest_value[0], manifest_value[1]) if isinstance(manifest_value, (list, tuple)) else (manifest_value.get("size"), manifest_value.get("mtime"))
+        source_changed = not sizes_and_times_match(source_entries[relative_path], manifest_tuple)
+        dest_changed = not sizes_and_times_match(dest_entries[relative_path], manifest_tuple)
+
+        if source_changed and dest_changed:
+            actions[relative_path] = "conflict"
+        elif source_changed:
+            actions[relative_path] = "copy_src_to_dest"
+        elif dest_changed:
+            actions[relative_path] = "copy_dest_to_src"
+        else:
+            actions[relative_path] = "noop"
+
+    return actions
+
+
+@dataclass
+class SyncResult:
+    success: bool = True
+    aborted: bool = False
+    copied_to_dest: int = 0
+    copied_to_source: int = 0
+    deleted_from_dest: int = 0
+    deleted_from_source: int = 0
+    conflicts: int = 0
+    errors: list = field(default_factory=list)
+    conflict_details: list = field(default_factory=list)
+
+
+def _conflict_copy_path(path: Path, label: str) -> Path:
+    return path.with_name(f"{path.stem} (Sync Conflict - {label}){path.suffix}")
+
+
+def run_sync_engine(
+    source: str,
+    destination: str,
+    include_subfolders: bool,
+    pause_event: threading.Event,
+    abort_event: threading.Event,
+    log_queue: queue.Queue,
+    base_dir: Path | None = None,
+) -> SyncResult:
+    source_root = Path(source)
+    dest_root = Path(destination)
+    result = SyncResult()
+
+    manifest_entries = load_sync_manifest(source, destination, base_dir)
+    source_snapshot = scan_folder_snapshot(source_root, include_subfolders)
+    dest_snapshot = scan_folder_snapshot(dest_root, include_subfolders)
+    actions = classify_sync_entries(source_snapshot, dest_snapshot, manifest_entries)
+
+    conflict_label = date.today().isoformat()
+    aborted = False
+
+    for relative_path, action in sorted(actions.items()):
+        if abort_event.is_set():
+            aborted = True
+            break
+        pause_event.wait()
+        if abort_event.is_set():
+            aborted = True
+            break
+
+        source_path = source_root / relative_path
+        dest_path = dest_root / relative_path
+
+        try:
+            if action == "noop":
+                continue
+            elif action == "copy_src_to_dest":
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, dest_path)
+                result.copied_to_dest += 1
+                log_queue.put(f"Sync: copied {relative_path} -> Destination")
+            elif action == "copy_dest_to_src":
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dest_path, source_path)
+                result.copied_to_source += 1
+                log_queue.put(f"Sync: copied {relative_path} -> Source")
+            elif action == "delete_dest":
+                if dest_path.exists():
+                    if send2trash is not None:
+                        send2trash(str(dest_path))
+                    else:
+                        dest_path.unlink()
+                result.deleted_from_dest += 1
+                log_queue.put(f"Sync: removed {relative_path} from Destination (deleted on Source)")
+            elif action == "delete_src":
+                if source_path.exists():
+                    if send2trash is not None:
+                        send2trash(str(source_path))
+                    else:
+                        source_path.unlink()
+                result.deleted_from_source += 1
+                log_queue.put(f"Sync: removed {relative_path} from Source (deleted on Destination)")
+            elif action == "conflict":
+                source_newer = source_path.stat().st_mtime >= dest_path.stat().st_mtime
+                winner_path, loser_path = (source_path, dest_path) if source_newer else (dest_path, source_path)
+                loser_conflict_dest = _conflict_copy_path(dest_path, conflict_label)
+                loser_conflict_source = _conflict_copy_path(source_path, conflict_label)
+
+                # Preserve the loser's bytes under conflict-marked names on BOTH
+                # sides before anything gets overwritten with the winner's content.
+                shutil.copy2(loser_path, loser_conflict_dest)
+                shutil.copy2(loser_path, loser_conflict_source)
+
+                if winner_path != dest_path:
+                    shutil.copy2(winner_path, dest_path)
+                if winner_path != source_path:
+                    shutil.copy2(winner_path, source_path)
+
+                result.conflicts += 1
+                winner_label = "Source" if winner_path == source_path else "Destination"
+                detail = (
+                    f"{relative_path}\n"
+                    f"    Newer version kept (from {winner_label})\n"
+                    f"    Older version saved as: {loser_conflict_dest.name}"
+                )
+                result.conflict_details.append(detail)
+                log_queue.put(
+                    f"Sync: CONFLICT on {relative_path} - kept newer version, "
+                    f"older version saved as {loser_conflict_dest.name}"
+                )
+        except OSError as exc:
+            result.errors.append(f"{relative_path}: {exc}")
+            log_queue.put(f"Sync ERROR on {relative_path}: {exc}")
+
+    result.aborted = aborted
+    result.success = not aborted and not result.errors
+
+    if not aborted:
+        final_source_snapshot = scan_folder_snapshot(source_root, include_subfolders)
+        final_manifest = {
+            path: {"size": size, "mtime": mtime}
+            for path, (size, mtime) in final_source_snapshot.items()
+        }
+        save_sync_manifest(source, destination, final_manifest, base_dir)
+
+    return result
 
 
 class ToolTip:
@@ -232,12 +1045,28 @@ class ToolTip:
             self.tip_window = None
 
 
+WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {f"{p}{n}" for p in ("COM", "LPT") for n in range(1, 10)}
+
+
+def new_folder_name_problem(name: str) -> str | None:
+    """Return why name can't be used for a new Windows folder, or None if it's fine."""
+    if not name:
+        return "Please enter a folder name."
+    if any(ch in '<>:"/\\|?*' or ord(ch) < 32 for ch in name):
+        return "A folder name can't contain any of these characters:\n" + '< > : " / \\ | ? *'
+    if name.endswith((".", " ")):
+        return "A folder name can't end with a full stop or a space."
+    if name.split(".")[0].upper() in WINDOWS_RESERVED_NAMES:
+        return f"'{name}' is a name reserved by Windows."
+    return None
+
+
 class SplashScreen(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title(f"{APP_NAME} - Welcome")
         self.configure(bg="#0b1020")
-        self.geometry("460x650")
+        self.geometry("460x690")
         self.resizable(False, False)
         self.transient(parent)
         self.attributes("-topmost", True)
@@ -266,6 +1095,9 @@ class SplashScreen(tk.Toplevel):
             bg="#0b1020",
             fg="#cbd5e1",
         ).pack()
+        coffee_link = add_coffee_link(self)
+        coffee_link.configure(bg="#0b1020")
+        coffee_link.pack(pady=(14, 0))
 
         button = tk.Button(
             self,
@@ -316,21 +1148,27 @@ class EZeeBackupApp(tk.Tk):
         self.config(menu=menu_bar)
 
         file_menu = tk.Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label="Import Master Jobs Profile (JSON)...", command=self.import_job_file_dialog)
+        file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.destroy, accelerator="Ctrl+Q")
         menu_bar.add_cascade(label="File", menu=file_menu, underline=0)
 
         edit_menu = tk.Menu(menu_bar, tearoff=0)
-        edit_menu.add_command(label="Save Job", command=self.save_current_job)
+        edit_menu.add_command(label="Save as New Job", command=self.save_current_job)
         edit_menu.add_command(label="Delete Job", command=self.delete_current_job)
         edit_menu.add_separator()
         edit_menu.add_command(label="Save Changes", command=self.save_job_changes, accelerator="Ctrl+S", state=tk.DISABLED)
         edit_menu.add_command(label="Forget Changes", command=self.forget_changes, state=tk.DISABLED)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Restore Master Jobs Profile from History...", command=self.open_restore_older_version)
         self.edit_menu = edit_menu
         menu_bar.add_cascade(label="Edit", menu=edit_menu, underline=0)
 
         help_menu = tk.Menu(menu_bar, tearoff=0)
         help_menu.add_command(label="About", command=self.open_about)
         help_menu.add_command(label="Backup Mode Info", command=self.open_backup_info)
+        help_menu.add_separator()
+        help_menu.add_command(label=f"Support {APP_NAME} ☕…", command=self.show_coffee)
         menu_bar.add_cascade(label="Help", menu=help_menu, underline=0)
 
         self.bind_all("<Control-s>", lambda event: self.save_job_changes())
@@ -350,16 +1188,26 @@ class EZeeBackupApp(tk.Tk):
         self.active_process = None
         self.process_paused = False
         self.operation_aborted = False
-        self.status_var = tk.StringVar(value="Ready")
-        self.activity_animation_id = None
-        self.activity_position = 0
-        self.activity_direction = 1
+        self.active_sync_thread = None
+        self.sync_pause_event = threading.Event()
+        self.sync_pause_event.set()
+        self.sync_abort_event = threading.Event()
+        self._destination_refresh_scheduled = False
         self.pending_jobs = []
         self.batch_job_names = []
+        self.batch_job_results = []
+        self.known_drive_status = {}
+        self._last_offline_transition = []
+        self._last_selection_offline_drives = []
 
-        self.jobs = load_jobs(job_file_path())
+        self.jobs, load_notice = load_jobs_with_report(job_file_path())
         self._build_ui()
         self._center_window()
+        if load_notice:
+            self.after_idle(lambda: self._report_job_file_recovery(load_notice))
+        self._old_wndproc = None
+        self._install_drive_change_watcher()
+        self.after_idle(self._check_drive_availability)
 
     def _center_window(self):
         self.update_idletasks()
@@ -434,6 +1282,7 @@ class EZeeBackupApp(tk.Tk):
         self.job_tree.tag_configure("sync", foreground="#ef4444", font=("Segoe UI", 10, "bold"))
         self.job_tree.tag_configure("move", foreground="#3b82f6", font=("Segoe UI", 10, "bold"))
         self.job_tree.tag_configure("compare", foreground="#a855f7", font=("Segoe UI", 10, "bold"))
+        self.job_tree.tag_configure("twoway", foreground="#f59e0b", font=("Segoe UI", 10, "bold"))
         self.job_tree.bind("<<TreeviewSelect>>", self._select_sidebar_item)
         self.job_tree.bind("<Button-3>", self._show_job_context_menu)
         form = tk.LabelFrame(workspace, text="Backup Settings", bg="#111827", fg="#e2e8f0", padx=12, pady=4, borderwidth=2, relief="groove")
@@ -444,10 +1293,20 @@ class EZeeBackupApp(tk.Tk):
             text="Showing Job Profile: ",
             anchor="w",
             bg="#111827",
-            fg="#f97316",
+            fg="#ffff00",
             font=("Segoe UI", 11, "bold"),
         )
         self.job_profile_label.pack(fill="x", pady=(0, 3))
+
+        self.drive_warning_label = tk.Label(
+            form,
+            text="",
+            anchor="w",
+            bg="#111827",
+            fg="#ef4444",
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.drive_warning_label.pack(fill="x", pady=(0, 3))
 
         row = tk.Frame(form, bg="#111827")
         row.pack(fill="x", pady=3)
@@ -487,7 +1346,7 @@ class EZeeBackupApp(tk.Tk):
         self.job_name = tk.StringVar(value="Daily Backup")
         self.job_name.trace_add("write", self._update_job_profile_label)
         self._update_job_profile_label()
-        tk.Button(job_row, text="Save Job...", command=self.save_current_job, bg="#1f2937", fg="#e2e8f0", relief="flat", font=("Segoe UI", 10, "bold"), padx=10).pack(side="left")
+        tk.Button(job_row, text="Save as New Job", command=self.save_current_job, bg="#1f2937", fg="#e2e8f0", relief="flat", font=("Segoe UI", 10, "bold"), padx=10).pack(side="left")
         tk.Button(job_row, text="Delete Job", command=self.delete_current_job, bg="#1f2937", fg="#e2e8f0", relief="flat", font=("Segoe UI", 10, "bold"), padx=10).pack(side="left", padx=(8, 0))
         self.save_changes_button = tk.Button(
             job_row,
@@ -515,7 +1374,7 @@ class EZeeBackupApp(tk.Tk):
             padx=10,
         )
         self.forget_changes_button.pack(side="left", padx=(8, 0))
-        self.refresh_jobs_list()
+        self.refresh_jobs_list(collapsed=True)  # Start with every sidebar node closed
 
         folder_views = tk.Frame(form, bg="#111827")
         folder_views.pack(fill="both", expand=True, pady=(3, 2))
@@ -531,8 +1390,8 @@ class EZeeBackupApp(tk.Tk):
 
         mode_frame = tk.Frame(mode_container, bg="#111827")
         mode_frame.pack(side="left")
-        mode_colors = {"backup": "#00ff00", "sync": "#ff3333", "move": "#00c3ff", "compare": "#e400ff"}
-        for label, value in [("Backup", "backup"), ("Mirror", "sync"), ("Move", "move"), ("Compare", "compare")]:
+        mode_colors = {"backup": "#00ff00", "sync": "#ff3333", "move": "#00c3ff", "compare": "#e400ff", "twoway": "#f59e0b"}
+        for label, value in [("Backup", "backup"), ("Mirror", "sync"), ("Move", "move"), ("Compare", "compare"), ("Sync", "twoway")]:
             tk.Radiobutton(
                 mode_frame,
                 text=label,
@@ -609,10 +1468,6 @@ class EZeeBackupApp(tk.Tk):
         self.pause_button.pack(side="left", padx=(10, 0))
         self.abort_button = tk.Button(action_group, text="Abort", command=self.abort_operation, bg="#5f3030", fg="#000000", disabledforeground="#000000", activebackground="#ef4444", activeforeground="#ffffff", relief="flat", font=("Segoe UI", 10, "bold"), padx=12, pady=8, state="disabled")
         self.abort_button.pack(side="left", padx=(8, 0))
-        self.activity_spinner = tk.Canvas(controls, bg="#374151", width=80, height=10, highlightthickness=0, bd=0)
-        self.activity_spinner.pack(side="right", padx=(0, 8))
-        self.activity_spinner.create_rectangle(0, 0, 80, 10, fill="#3f8f5f", outline="")
-        tk.Label(controls, textvariable=self.status_var, width=10, anchor="center", bg="#111827", fg="#cbd5e1", font=("Segoe UI", 10, "bold")).pack(side="right", padx=(0, 8))
 
         log_frame = tk.LabelFrame(self, text="Activity Log", bg="#111827", fg="#e2e8f0", padx=10, pady=10)
         log_frame.pack(fill="both", expand=True, padx=18, pady=(0, 10))
@@ -676,52 +1531,18 @@ class EZeeBackupApp(tk.Tk):
         self.log_widget.see("end")
 
     def _set_operation_controls(self, running):
-        self.run_button.configure(state="disabled" if running else "normal")
+        if running:
+            self.run_button.configure(state="disabled")
+        else:
+            self._update_run_button_state()
         self.pause_button.configure(state="normal" if running else "disabled")
         self.abort_button.configure(state="normal" if running else "disabled")
-        if running:
-            self.status_var.set("Working")
-            self._start_activity_animation(reset=True)
-        else:
-            self.status_var.set("Ready")
-            self._stop_activity_animation()
         if running:
             self.pause_button.configure(bg="#b45309", fg="#ffffff")
             self.abort_button.configure(bg="#b91c1c", fg="#ffffff")
         else:
             self.pause_button.configure(bg="#5b4a2f", fg="#000000")
             self.abort_button.configure(bg="#5f3030", fg="#000000")
-
-    def _start_activity_animation(self, reset=False):
-        if self.activity_animation_id is not None:
-            return
-        if reset:
-            self.activity_position = 0
-            self.activity_direction = 1
-        self._animate_activity_indicator()
-
-    def _pause_activity_animation(self):
-        if self.activity_animation_id is not None:
-            self.after_cancel(self.activity_animation_id)
-            self.activity_animation_id = None
-
-    def _animate_activity_indicator(self):
-        self.activity_spinner.delete("all")
-        self.activity_spinner.create_rectangle(0, 0, 80, 10, fill="#374151", outline="")
-        self.activity_spinner.create_rectangle(self.activity_position, 0, self.activity_position + 24, 10, fill="#f59e0b", outline="")
-        next_position = self.activity_position + self.activity_direction * 2
-        if next_position < 0 or next_position > 56:
-            self.activity_direction *= -1
-            next_position = self.activity_position + self.activity_direction * 2
-        self.activity_position = next_position
-        self.activity_animation_id = self.after(70, self._animate_activity_indicator)
-
-    def _stop_activity_animation(self):
-        if self.activity_animation_id is not None:
-            self.after_cancel(self.activity_animation_id)
-            self.activity_animation_id = None
-        self.activity_spinner.delete("all")
-        self.activity_spinner.create_rectangle(0, 0, 80, 10, fill="#3f8f5f", outline="")
 
     def _set_process_paused(self, process, paused):
         if os.name != "nt":
@@ -743,26 +1564,33 @@ class EZeeBackupApp(tk.Tk):
 
     def toggle_pause(self):
         process = self.active_process
-        if process is None or process.poll() is not None:
-            return False
-        paused = not self.process_paused
-        try:
-            self._set_process_paused(process, paused)
-        except OSError as exc:
-            self._log(f"Unable to {'pause' if paused else 'resume'} operation: {exc}")
+        sync_running = self.active_sync_thread is not None and self.active_sync_thread.is_alive()
+        if process is not None and process.poll() is None:
+            paused = not self.process_paused
+            try:
+                self._set_process_paused(process, paused)
+            except OSError as exc:
+                self._log(f"Unable to {'pause' if paused else 'resume'} operation: {exc}")
+                return False
+        elif sync_running:
+            paused = not self.process_paused
+            if paused:
+                self.sync_pause_event.clear()
+            else:
+                self.sync_pause_event.set()
+        else:
             return False
         self.process_paused = paused
         self.pause_button.configure(text="Resume" if paused else "Pause")
-        if paused:
-            self._pause_activity_animation()
-        else:
-            self._start_activity_animation()
         self._log("Operation paused." if paused else "Operation resumed.")
         return True
 
     def abort_operation(self):
         process = self.active_process
-        if process is None or process.poll() is not None:
+        sync_running = self.active_sync_thread is not None and self.active_sync_thread.is_alive()
+        if process is not None and process.poll() is not None:
+            process = None
+        if process is None and not sync_running:
             return
         paused_before_abort = self.process_paused
         if not paused_before_abort and not self.toggle_pause():
@@ -772,11 +1600,17 @@ class EZeeBackupApp(tk.Tk):
                 self.toggle_pause()
             return
         self.operation_aborted = True
-        try:
-            process.terminate()
-            self._log("Abort requested. Waiting for Robocopy to stop...")
-        except OSError as exc:
-            self._log(f"Unable to abort operation: {exc}")
+        if process is not None:
+            try:
+                process.terminate()
+                self._log("Abort requested. Waiting for Robocopy to stop...")
+            except OSError as exc:
+                self._log(f"Unable to abort operation: {exc}")
+        else:
+            self.sync_abort_event.set()
+            # Wake a currently-paused worker thread so it can reach the abort checkpoint.
+            self.sync_pause_event.set()
+            self._log("Abort requested. Waiting for Sync to stop...")
 
     def _create_folder_view(self, parent, title):
         panel = tk.Frame(parent, bg="#111827")
@@ -793,7 +1627,10 @@ class EZeeBackupApp(tk.Tk):
         tree._file_icons = self.file_icons
         tree._folder_paths = {}
         tree._loaded_folders = set()
+        tree._root_path = None
+        tree._include_subfolders = True
         tree.bind("<<TreeviewOpen>>", self._expand_folder_item)
+        tree.bind("<Button-3>", self._show_folder_context_menu)
         scrollbar = ttk.Scrollbar(view_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -829,6 +1666,7 @@ class EZeeBackupApp(tk.Tk):
         tree._loaded_folders = set()
         tree._include_subfolders = include_subfolders
         path = Path(folder.strip()) if folder.strip() else None
+        tree._root_path = path
         if path is None:
             return
         self._insert_folder_entries(tree, "", path)
@@ -864,7 +1702,8 @@ class EZeeBackupApp(tk.Tk):
                     )
             tree._loaded_folders.add(str(path))
         except (OSError, PermissionError):
-            tree.insert(parent, "end", text="Unable to read folder", values=("",))
+            tree.insert(parent, "end", text="Folder No Longer Available on this Drive", values=("",))
+            play_standard_alert_beep()
 
     def _expand_folder_item(self, event):
         tree = event.widget
@@ -872,6 +1711,110 @@ class EZeeBackupApp(tk.Tk):
         path = tree._folder_paths.get(item_id)
         if path is None or str(path) in tree._loaded_folders:
             return
+        tree.delete(*tree.get_children(item_id))
+        self._insert_folder_entries(tree, item_id, path)
+
+    def _show_folder_context_menu(self, event):
+        """Source/Destination right-click: New Folder inside the clicked folder, the clicked file's
+        folder, or (on empty space) the top-level folder; plus Delete when a file was clicked."""
+        tree = event.widget
+        row = tree.identify_row(event.y)
+        if row in tree._folder_paths:
+            target_item, target_path = row, tree._folder_paths[row]
+        else:
+            target_item = tree.parent(row) if row else ""
+            target_path = tree._folder_paths.get(target_item) if target_item else tree._root_path
+        if row:
+            tree.selection_set(row)
+            tree.focus(row)
+        available = target_path is not None and target_path.is_dir() and not self._operation_is_running()
+        place = (target_path.name or str(target_path)) if target_path is not None else "folder"
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(
+            label=f"New Folder in '{place}'…",
+            command=lambda: self._create_folder_in_tree(tree, target_item, target_path),
+            state=tk.NORMAL if available else tk.DISABLED,
+        )
+        file_name = tree.item(row, "text") if row and row not in tree._folder_paths else ""
+        if file_name and target_path is not None and (target_path / file_name).is_file():
+            menu.add_separator()
+            menu.add_command(
+                label=f"Delete '{file_name}'",
+                command=lambda: self._delete_file_in_tree(tree, target_item, target_path, file_name),
+                state=tk.NORMAL if send2trash is not None and not self._operation_is_running() else tk.DISABLED,
+            )
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _delete_file_in_tree(self, tree, parent_item, parent_path, file_name):
+        file_path = parent_path / file_name
+        if not messagebox.askyesno(
+            "Delete File",
+            f"Send this file to the Recycle Bin?\n\n{file_path}",
+            icon=messagebox.WARNING,
+            parent=self,
+        ):
+            return
+        try:
+            send2trash(str(file_path))
+        except OSError as error:
+            messagebox.showerror("Delete File", f"Could not delete the file:\n{file_path}\n\n{error}", parent=self)
+            return
+        self._log(f"Sent file to the Recycle Bin: {file_path}")
+        self._reload_folder_level(tree, parent_item, parent_path)
+        if parent_item:
+            tree.item(parent_item, open=True)
+            tree.selection_set(parent_item)
+            tree.focus(parent_item)
+
+    def _create_folder_in_tree(self, tree, parent_item, parent_path):
+        name = "New Folder"
+        while True:
+            name = simpledialog.askstring(
+                "New Folder",
+                f"Create a new folder in:\n{parent_path}\n\nFolder name:",
+                initialvalue=name,
+                parent=self,
+            )
+            if name is None:
+                return
+            name = name.strip()
+            problem = new_folder_name_problem(name)
+            if problem is None and (parent_path / name).exists():
+                problem = f"'{name}' already exists in this folder."
+            if problem is None:
+                break
+            messagebox.showerror("New Folder", problem, parent=self)
+        new_path = parent_path / name
+        try:
+            new_path.mkdir()
+        except OSError as error:
+            messagebox.showerror("New Folder", f"Could not create the folder:\n{new_path}\n\n{error}", parent=self)
+            return
+        self._log(f"Created folder: {new_path}")
+        if not tree._include_subfolders:
+            self._log("Folders aren't listed while 'Include subfolders' is off.")
+            return
+        self._reload_folder_level(tree, parent_item, parent_path)
+        if parent_item:
+            tree.item(parent_item, open=True)
+        for item in tree.get_children(parent_item):
+            if tree._folder_paths.get(item) == new_path:
+                tree.selection_set(item)
+                tree.focus(item)
+                tree.see(item)
+                break
+
+    def _reload_folder_level(self, tree, item_id, path):
+        """Re-read one folder's entries into the tree; folders below it are re-read when next expanded."""
+        def forget(node):
+            for child in tree.get_children(node):
+                forget(child)
+                tree._folder_paths.pop(child, None)
+
+        forget(item_id)
+        tree._loaded_folders = {
+            loaded for loaded in tree._loaded_folders if Path(loaded) != path and path not in Path(loaded).parents
+        }
         tree.delete(*tree.get_children(item_id))
         self._insert_folder_entries(tree, item_id, path)
 
@@ -891,6 +1834,38 @@ class EZeeBackupApp(tk.Tk):
             self.destination_var.get(),
             include_subfolders=include_subfolders,
         )
+
+    def _operation_is_running(self):
+        return (self.active_process is not None and self.active_process.poll() is None) or (
+            self.active_sync_thread is not None and self.active_sync_thread.is_alive()
+        )
+
+    def _start_destination_auto_refresh(self):
+        if self._destination_refresh_scheduled:
+            return
+        self._destination_refresh_scheduled = True
+        self.after(2000, self._auto_refresh_destination_view)
+
+    def _refresh_folder_views_for_active_mode(self):
+        # Backup/Mirror/Compare only ever change Destination; refreshing Source
+        # too would reset the user's expanded folder state there for no reason.
+        # Move removes files from Source, and Sync changes both sides, so those
+        # two modes need the Source tree refreshed as well.
+        if self.mode_var.get() in ("move", "twoway"):
+            self.refresh_folder_views()
+        else:
+            self._populate_folder_view(
+                self.destination_tree,
+                self.destination_var.get(),
+                include_subfolders=self.include_subfolders_var.get(),
+            )
+
+    def _auto_refresh_destination_view(self):
+        if not self._operation_is_running():
+            self._destination_refresh_scheduled = False
+            return
+        self._refresh_folder_views_for_active_mode()
+        self.after(2000, self._auto_refresh_destination_view)
 
     def browse_source(self):
         folder = filedialog.askdirectory(
@@ -916,6 +1891,13 @@ class EZeeBackupApp(tk.Tk):
             self.about_window.focus_force()
             return
         self.about_window = SplashScreen(self)
+
+    def show_coffee(self):
+        win = show_support(self, APP_NAME, reason="It helps keep the app going and improving.")
+        try:
+            win.iconbitmap(str(bundled_asset_path("ezee-backup.ico")))
+        except tk.TclError:
+            pass
 
     def _update_job_profile_label(self, *_args):
         name = self.job_name.get().strip() or "Untitled"
@@ -946,9 +1928,10 @@ class EZeeBackupApp(tk.Tk):
 
         explanations = (
             ("BACKUP", "Copies new and changed files to the destination."),
-            ("MIRROR", "Makes the destination mirror the source, including deletions."),
+            ("MIRROR", "Makes the Destination mirror the Source - including deletions. \nUseful when a large project is completed, thus making the \nDestination folder an exact copy of the Source Folder. \nAny old temp or scratch files in the Destination Folder \nthat are not present in the Source Folder will be removed. \n\nThe Source Folder is the Master Reference."),
             ("MOVE", "Copies files to the destination and removes them from the source."),
             ("COMPARE", "Lists what would be copied without changing either folder."),
+            ("SYNC", "Copies new and changed files in both directions and propagates \ndeletions between them, using each job's saved history. \nDeletions go to the Recycle Bin. If a file changed on both sides, the newer \nversion keeps its name and the older version is kept alongside it, \non both sides, as 'name (Sync Conflict - date).ext'.\n\n e.g.: report.docx → report (Sync Conflict - 2026-09-24).docx"),
         )
         for mode, explanation in explanations:
             row = tk.Frame(content, bg="#111827")
@@ -959,14 +1942,16 @@ class EZeeBackupApp(tk.Tk):
                 font=("Segoe UI", 10, "bold"),
                 bg="#111827",
                 fg="#e2e8f0",
-            ).pack(side="left")
+            ).pack(side="left", anchor="n")
             tk.Label(
                 row,
                 text=explanation,
                 font=("Segoe UI", 10),
                 bg="#111827",
                 fg="#cbd5e1",
-            ).pack(side="left")
+                wraplength=420,
+                justify="left",
+            ).pack(side="left", anchor="n")
 
         tk.Button(
             content,
@@ -993,6 +1978,172 @@ class EZeeBackupApp(tk.Tk):
         self.log_widget.insert("end", f"{message}\n", tag)
         self.log_widget.see("end")
         self.update_idletasks()
+
+    def _current_selection_offline_drives(self):
+        """Offline drives for the selected job. Returns [] for group/all (those run per-job with skip+report)."""
+        selected = self._selected_sidebar_item()
+        if not selected or selected[0] != "job":
+            self._last_offline_transition = []
+            return []
+        paths = [self.source_var.get(), self.destination_var.get()]
+        drives = {extract_drive_letter(path) for path in paths if extract_drive_letter(path)}
+        # Route through the tracked/alerted status check, not a silent is_drive_online()
+        # call, so a drive found offline here still triggers the sound + popup.
+        self._last_offline_transition = self._update_drive_statuses(drives) if drives else []
+        return sorted(drive for drive in drives if not self.known_drive_status.get(drive, True))
+
+    def _group_selection_offline_job_names(self):
+        selected = self._selected_sidebar_item()
+        if not selected or selected[0] not in ("group", "all"):
+            return []
+        job_drives = []
+        all_drives = set()
+        for job in self._jobs_for_selection():
+            paths = (job.get("source", ""), job.get("destination", ""))
+            drives = {extract_drive_letter(path) for path in paths if extract_drive_letter(path)}
+            job_drives.append((str(job.get("name", "Untitled")), drives))
+            all_drives |= drives
+        if all_drives:
+            self._update_drive_statuses(all_drives)
+        return [
+            name for name, drives in job_drives
+            if any(not self.known_drive_status.get(drive, True) for drive in drives)
+        ]
+
+    def _update_run_button_state(self):
+        offline = self._current_selection_offline_drives()
+        self._last_selection_offline_drives = offline
+        if hasattr(self, "run_button"):
+            self.run_button.configure(state="disabled" if offline else "normal")
+        if hasattr(self, "drive_warning_label"):
+            if offline:
+                self.drive_warning_label.config(text=f"\u26a0 Drive {', '.join(offline)}: offline - this profile cannot run.")
+                return
+            affected_group_jobs = self._group_selection_offline_job_names()
+            if affected_group_jobs:
+                self.drive_warning_label.config(
+                    text=f"\u26a0 Offline drive detected - {len(affected_group_jobs)} job(s) in this selection will be skipped: {', '.join(affected_group_jobs)}"
+                )
+            else:
+                self.drive_warning_label.config(text="")
+
+    def _check_drive_availability(self):
+        drives = collect_drive_letters(self.jobs)
+        self.known_drive_status = {drive: is_drive_online(drive) for drive in drives}
+        offline_drives = sorted(drive for drive, online in self.known_drive_status.items() if not online)
+        if not offline_drives:
+            self._update_run_button_state()
+            self._log(f"Startup check: {len(drives)} drive letter(s) referenced by job profiles, all online.")
+        else:
+            self._notify_offline_drives(offline_drives)
+        self._schedule_drive_poll()
+
+    def _affected_jobs_for_drives(self, drives) -> list:
+        drives = set(drives)
+        return sorted({
+            str(job.get("name", "Untitled"))
+            for job in self.jobs
+            if extract_drive_letter(job.get("source", "")) in drives
+            or extract_drive_letter(job.get("destination", "")) in drives
+        })
+
+    def _notify_offline_drives(self, offline_drives):
+        affected_jobs = self._affected_jobs_for_drives(offline_drives)
+        self._log(
+            f"WARNING: Offline/disconnected drive(s) detected: {', '.join(offline_drives)}. "
+            f"Affected job(s): {', '.join(affected_jobs) if affected_jobs else 'unknown'}.",
+            "job_report",
+        )
+        play_error_sound()
+        message = (
+            "The following drive letter(s) used by your backup profiles are OFFLINE or unreachable:\n\n"
+            + "\n".join(f"  - {drive}" for drive in offline_drives)
+            + "\n\nAffected job profile(s):\n"
+            + "\n".join(f"  - {name}" for name in affected_jobs)
+            + "\n\nPlease reconnect the drive(s)/cable(s) before running these backups."
+        )
+        messagebox.showwarning("Offline Drive Detected", message, parent=self)
+        self._update_run_button_state()
+
+    def _schedule_drive_poll(self):
+        self.after(DRIVE_POLL_INTERVAL_MS, self._poll_drive_status)
+
+    def _update_drive_statuses(self, drives) -> list:
+        newly_offline = []
+        newly_online = []
+        for drive in drives:
+            online_now = is_drive_online(drive)
+            was_online = self.known_drive_status.get(drive, True)
+            if was_online and not online_now:
+                newly_offline.append(drive)
+            elif not was_online and online_now:
+                newly_online.append(drive)
+            self.known_drive_status[drive] = online_now
+        if newly_offline:
+            self._notify_offline_drives(sorted(newly_offline))
+        if newly_online:
+            self._log(f"Drive(s) reconnected: {', '.join(sorted(newly_online))}.", "job_report")
+            play_completion_chime()
+            self._update_run_button_state()
+        return newly_offline
+
+    def _poll_drive_status(self):
+        # Slow safety-net: catches cases WM_DEVICECHANGE misses (silent
+        # power loss, flaky enclosures, mapped network drives going dark).
+        if not self.winfo_exists():
+            return
+        drives = collect_drive_letters(self.jobs)
+        for drive in list(self.known_drive_status):
+            if drive not in drives:
+                del self.known_drive_status[drive]
+        self._update_drive_statuses(drives)
+        self._schedule_drive_poll()
+
+    # --- Event-driven detection via WM_DEVICECHANGE ------------------------
+
+    def _install_drive_change_watcher(self) -> None:
+        self.update_idletasks()
+        hwnd = self.winfo_id()
+        self._new_wndproc = WNDPROCTYPE(self._drive_watcher_wndproc)
+        self._old_wndproc = _user32.SetWindowLongPtrW(
+            hwnd, GWLP_WNDPROC, self._new_wndproc
+        )
+
+    def _uninstall_drive_change_watcher(self) -> None:
+        if self._old_wndproc is None:
+            return
+        hwnd = self.winfo_id()
+        _user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, self._old_wndproc)
+        self._old_wndproc = None
+
+    def destroy(self):
+        self._uninstall_drive_change_watcher()
+        super().destroy()
+
+    def _drive_watcher_wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == WM_DEVICECHANGE and wparam in (DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE):
+            self._handle_device_change(lparam)
+        return _user32.CallWindowProcW(self._old_wndproc, hwnd, msg, wparam, lparam)
+
+    def _handle_device_change(self, lparam) -> None:
+        if not lparam:
+            return
+        header = DEV_BROADCAST_HDR.from_address(lparam)
+        if header.dbch_devicetype != DBT_DEVTYP_VOLUME:
+            return
+        volume = DEV_BROADCAST_VOLUME.from_address(lparam)
+        changed_drives = unitmask_to_drive_letters(volume.dbcv_unitmask)
+        # Defer to the Tk event loop's idle cycle rather than doing work
+        # (messageboxes, sounds) directly inside the raw window-proc callback.
+        self.after_idle(lambda: self._refresh_drive_status(changed_drives))
+
+    def _refresh_drive_status(self, changed_drives) -> None:
+        if not self.winfo_exists():
+            return
+        tracked = collect_drive_letters(self.jobs)
+        drives = [drive for drive in changed_drives if drive in tracked]
+        if drives:
+            self._update_drive_statuses(drives)
 
     def _should_log_line(self, text: str) -> bool:
         stripped = text.strip()
@@ -1054,7 +2205,12 @@ class EZeeBackupApp(tk.Tk):
         self.operation_aborted = False
         self.pause_button.configure(text="Pause")
         self._set_operation_controls(False)
+        self._refresh_folder_views_for_active_mode()
         self._log(f"Operation aborted with exit code {code}." if aborted else final_message.format(code=code))
+        if self.batch_job_names:
+            job_ok = not aborted and is_successful_robocopy_exit_code(code)
+            reason = None if job_ok else f"Robocopy exit code {code}."
+            self.batch_job_results.append((self.batch_job_names[-1], reason))
         if self.pending_jobs and not aborted:
             self.after_idle(self._run_next_job)
         else:
@@ -1069,25 +2225,163 @@ class EZeeBackupApp(tk.Tk):
         if not self.batch_job_names:
             return
         count = len(self.batch_job_names)
-        self._log(f"Backup report: {count} JOB{'s' if count != 1 else ''} run.", "job_report")
+        failures = [(name, reason) for name, reason in self.batch_job_results if reason]
+        succeeded = count - len(failures)
+        self._log(f"Backup report: {count} JOB{'s' if count != 1 else ''} run ({succeeded} succeeded, {len(failures)} failed).", "job_report")
         for name in self.batch_job_names:
-            self._log(f"  JOB profile: {name}", "job_report")
+            failure_reason = next((reason for job_name, reason in failures if job_name == name), None)
+            status = f"FAILED - {failure_reason}" if failure_reason else "OK"
+            self._log(f"  JOB profile: {name} [{status}]", "job_report")
         self.batch_job_names = []
+        self.batch_job_results = []
 
-    def refresh_jobs_list(self):
+    def _launch_sync_job(self, source, destination, include_subfolders, log_mode):
+        if send2trash is None:
+            self._set_operation_controls(False)
+            self._log("Sync requires the 'send2trash' package, which is not installed.")
+            play_error_sound()
+            messagebox.showerror(
+                "Missing dependency",
+                "Sync mode requires the 'send2trash' package.\n\nInstall it with:\n\npip install send2trash",
+                parent=self,
+            )
+            return
+
+        self._log(f"Running Sync: {source} <-> {destination}")
+        self.sync_pause_event.set()
+        self.sync_abort_event.clear()
+        self.process_paused = False
+        self.operation_aborted = False
+        log_queue = queue.Queue()
+        result_box = {}
+        thread = threading.Thread(
+            target=self._run_sync_worker,
+            args=(source, destination, include_subfolders, log_queue, result_box),
+            daemon=True,
+        )
+        self.active_sync_thread = thread
+        self._set_operation_controls(True)
+        self._start_destination_auto_refresh()
+        thread.start()
+        self.after(100, lambda: self._poll_sync_job(thread, log_queue, result_box, log_mode, source, destination))
+
+    def _run_sync_worker(self, source, destination, include_subfolders, log_queue, result_box):
+        try:
+            result_box["result"] = run_sync_engine(
+                source,
+                destination,
+                include_subfolders,
+                self.sync_pause_event,
+                self.sync_abort_event,
+                log_queue,
+            )
+        except Exception as exc:
+            log_queue.put(f"Sync ERROR: {exc}")
+            result_box["result"] = SyncResult(success=False, errors=[str(exc)])
+
+    def _poll_sync_job(self, thread, log_queue, result_box, log_mode, source, destination):
+        if log_mode == "No Logs":
+            while True:
+                try:
+                    log_queue.get_nowait()
+                except queue.Empty:
+                    break
+        else:
+            self._drain_output_queue(log_queue)
+        if thread.is_alive():
+            self.after(100, lambda: self._poll_sync_job(thread, log_queue, result_box, log_mode, source, destination))
+            return
+
+        result = result_box.get("result") or SyncResult(success=False, errors=["Sync worker exited unexpectedly."])
+        aborted = self.operation_aborted or result.aborted
+        self.active_sync_thread = None
+        self.process_paused = False
+        self.operation_aborted = False
+        self.pause_button.configure(text="Pause")
+        self._set_operation_controls(False)
+        self._refresh_folder_views_for_active_mode()
+
+        if aborted:
+            self._log("Sync aborted.")
+        else:
+            summary = (
+                f"Sync complete. Copied {result.copied_to_dest} to Destination, "
+                f"{result.copied_to_source} to Source, deleted {result.deleted_from_dest} from Destination, "
+                f"{result.deleted_from_source} from Source, {result.conflicts} conflict(s)."
+            )
+            self._log(summary)
+            for error in result.errors:
+                self._log(f"Sync error: {error}", "job_report")
+            if result.conflicts:
+                job_name = self.batch_job_names[-1] if self.batch_job_names else (self.job_name.get() or "this Sync job")
+                messagebox.showwarning(
+                    "Sync Conflicts Found",
+                    f"Sync job '{job_name}' found {result.conflicts} file(s) changed on both "
+                    "Source and Destination since the last sync.\n\n"
+                    "Please examine these files and make any adjustments needed.\n\n"
+                    "Click OK to view Report.",
+                    parent=self,
+                )
+                self._launch_sync_conflict_report(job_name, source, destination, result)
+
+        if self.batch_job_names:
+            job_ok = not aborted and result.success
+            reason = None if job_ok else "; ".join(result.errors) or "Sync aborted."
+            self.batch_job_results.append((self.batch_job_names[-1], reason))
+        if self.pending_jobs and not aborted:
+            self.after_idle(self._run_next_job)
+        else:
+            self._log_job_batch_report()
+            self.pending_jobs = []
+            if aborted or not result.success:
+                play_error_sound()
+            else:
+                play_completion_chime()
+
+    def _launch_sync_conflict_report(self, job_name, source, destination, result: "SyncResult"):
+        header_lines = [
+            "EZee-Backup Sync Conflict Report",
+            f"Job: {job_name}",
+            f"Source: {source}",
+            f"Destination: {destination}",
+            f"Conflicts found: {result.conflicts}",
+            "",
+            "The newer version of each file below was kept under its original name.",
+            "The older version was kept alongside it, on both sides, as",
+            "'name (Sync Conflict - date).ext'. Please examine these files and make",
+            "any adjustments needed.",
+        ]
+        report_text = "\n".join(header_lines) + "\n\n" + "\n\n".join(result.conflict_details)
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".txt",
+                prefix="ezee-backup-sync-conflicts-",
+                encoding="utf-8",
+                delete=False,
+            ) as report_file:
+                report_file.write(report_text)
+                report_path = report_file.name
+            subprocess.Popen(["notepad.exe", report_path])
+        except OSError as exc:
+            messagebox.showerror("Notepad", f"Unable to launch Notepad:\n{exc}", parent=self)
+
+    def refresh_jobs_list(self, collapsed=False):
         self.job_tree.delete(*self.job_tree.get_children())
+        expand = not collapsed
         groups = {}
         for index, job in enumerate(self.jobs):
             group = str(job.get("group", "")).strip()
             groups.setdefault(group, []).append((index, job))
-        all_jobs = self.job_tree.insert("", "end", text="All Jobs", values=("all", ""), open=True)
+        all_jobs = self.job_tree.insert("", "end", text="All Jobs", values=("all", ""), open=expand)
         for index, job in enumerate(self.jobs):
             mode = str(job.get("mode", "backup")).lower()
             self.job_tree.insert(all_jobs, "end", text=job.get("name", "Untitled"), values=("job", index), tags=(mode,))
         for group, members in groups.items():
             if not group:
                 continue
-            parent = self.job_tree.insert("", "end", text=group, values=("group", group), open=True)
+            parent = self.job_tree.insert("", "end", text=group, values=("group", group), open=expand)
             for index, job in members:
                 mode = str(job.get("mode", "backup")).lower()
                 self.job_tree.insert(parent, "end", text=job.get("name", "Untitled"), values=("job", index), tags=(mode,))
@@ -1130,13 +2424,18 @@ class EZeeBackupApp(tk.Tk):
         selected = self._selected_sidebar_item()
         if selected and selected[0] == "job":
             self._set_profile_modified(True)
+        self._update_run_button_state()
 
     def _select_sidebar_item(self, _event=None):
         selected = self._selected_sidebar_item()
         if not selected:
             return
+        repeat_offline_selection = False
         if selected[0] == "job":
             self.load_selected_job(int(selected[1]))
+            # load_selected_job() already ran the drive check via _update_run_button_state();
+            # capture its verdict now, before the redundant call below overwrites it.
+            repeat_offline_selection = bool(self._last_selection_offline_drives) and not self._last_offline_transition
         else:
             self._set_profile_modified(False)
             self.source_var.set("")
@@ -1151,6 +2450,9 @@ class EZeeBackupApp(tk.Tk):
                 self.job_profile_label.config(text=f"All Jobs is selected with {len(self.jobs)} Jobs")
             else:
                 self._update_job_profile_label()
+        self._update_run_button_state()
+        if repeat_offline_selection:
+            play_standard_alert_beep()
 
     def _show_job_context_menu(self, event):
         item_id = self.job_tree.identify_row(event.y)
@@ -1217,8 +2519,33 @@ class EZeeBackupApp(tk.Tk):
         self.jobs = existing
         save_jobs(self.jobs, job_file_path())
         self._set_profile_modified(False)
-        self.refresh_jobs_list()
+        self.refresh_jobs_list(collapsed=True)
+        self._focus_job_in_sidebar(len(self.jobs) - 1)
         self._log(f"Saved job: {name}")
+
+    def _focus_job_in_sidebar(self, index, group=None):
+        """Open one sidebar group ("All Jobs" when group is None) and select, focus and scroll to the job's row in it.
+
+        With index None, the group's first row is used. Returns False if the group isn't in the tree.
+        """
+        parent = None
+        for node in self.job_tree.get_children():
+            kind, value = self.job_tree.item(node).get("values", (None, None))
+            if (group is None and kind == "all") or (group is not None and kind == "group" and str(value) == group):
+                parent = node
+                break
+        if parent is None:
+            return False
+        self.job_tree.item(parent, open=True)
+        for item in self.job_tree.get_children(parent):
+            kind, value = self.job_tree.item(item).get("values", (None, None))
+            if kind == "job" and (index is None or int(value) == index):
+                self.job_tree.selection_set(item)
+                self.job_tree.focus(item)
+                self.job_tree.see(item)
+                self.job_tree.focus_set()
+                break
+        return True
 
     def save_job_changes(self):
         selected = self._selected_sidebar_item()
@@ -1238,15 +2565,241 @@ class EZeeBackupApp(tk.Tk):
         )
         save_jobs(self.jobs, job_file_path())
         self._set_profile_modified(False)
-        self.refresh_jobs_list()
+        self._update_job_rows(index)
         self._log(f"Saved changes to job: {job.get('name', 'Untitled')}")
 
+    def _update_job_rows(self, index):
+        """Refresh the mode tag of a job's sidebar rows in place, keeping the tree's selection and expansion."""
+        mode = str(self.jobs[index].get("mode", "backup")).lower()
+        for parent in self.job_tree.get_children():
+            for item in self.job_tree.get_children(parent):
+                kind, value = self.job_tree.item(item).get("values", (None, None))
+                if kind == "job" and int(value) == index:
+                    self.job_tree.item(item, tags=(mode,))
+
     def forget_changes(self):
-        self.jobs = load_jobs(job_file_path())
+        self.jobs, load_notice = load_jobs_with_report(job_file_path())
         self._set_profile_modified(False)
         self.refresh_jobs_list()
         self._load_initial_job()
         self._log("Forgot unsaved changes and reloaded JOB profiles.")
+        if load_notice:
+            self._report_job_file_recovery(load_notice)
+
+    def open_restore_older_version(self):
+        """Edit > Restore Master Jobs Profile from History: pick a dated copy of the JOB file and make it current."""
+        if self._operation_is_running():
+            messagebox.showinfo(
+                "Restore Master Jobs Profile", "Please wait until the current operation finishes.", parent=self
+            )
+            return
+        target = job_file_path()
+        dated_copies = history_files(target)
+        if not dated_copies:
+            messagebox.showinfo(
+                "Restore Master Jobs Profile",
+                f"There are no dated copies of your job profiles yet.\n\nThey are kept in:\n{history_dir(target)}",
+                parent=self,
+            )
+            return
+        _current_jobs, current_raw, _problem = read_jobs_file(target)
+        current_jobs = _current_jobs or []
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Restore Master Jobs Profile")
+        dialog.configure(bg="#111827")
+        dialog.transient(self)
+        dialog.minsize(760, 380)
+
+        tk.Label(
+            dialog,
+            text="Choose an earlier version of your job profiles to restore:",
+            bg="#111827", fg="#e2e8f0", font=("Segoe UI", 10, "bold"),
+        ).pack(padx=18, pady=(16, 2), anchor="w")
+        tk.Label(
+            dialog,
+            text="Your current profiles are kept as a dated copy first, so a restore can be undone here.",
+            bg="#111827", fg="#94a3b8", font=("Segoe UI", 9),
+        ).pack(padx=18, pady=(0, 8), anchor="w")
+
+        table_frame = tk.Frame(dialog, bg="#111827")
+        table_frame.pack(fill="both", expand=True, padx=18)
+        columns = ("when", "jobs", "groups", "changes")
+        table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse", height=12)
+        for column, heading, width, stretch in (
+            ("when", "Saved", 190, False),
+            ("jobs", "Jobs", 55, False),
+            ("groups", "Groups", 60, False),
+            ("changes", "Restoring this version would...", 420, True),
+        ):
+            table.heading(column, text=heading, anchor="w")
+            table.column(column, width=width, stretch=stretch, anchor="w")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
+        table.configure(yscrollcommand=scrollbar.set)
+        table.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        table.tag_configure("unusable", foreground="#9ca3af")
+
+        rows = {}
+        for stamp, dated in dated_copies:
+            dated_jobs, dated_raw, problem = read_jobs_file(dated)
+            when = stamp.strftime("%a %d %b %Y  %H:%M:%S")
+            if dated_jobs is None:
+                values = (when, "-", "-", f"Cannot be used: {problem}")
+                tags = ("unusable",)
+            else:
+                groups = {str(job.get("group", "")).strip() for job in dated_jobs} - {""}
+                if dated_raw == current_raw:
+                    changes = "Nothing - this is the current version"
+                else:
+                    changes = summarize_job_changes(current_jobs, dated_jobs)
+                values = (when, len(dated_jobs), len(groups), changes)
+                tags = ()
+            item = table.insert("", "end", values=values, tags=tags)
+            rows[item] = (stamp, dated, dated_jobs is not None, dated_raw == current_raw, values[3])
+        first = table.get_children()[0]
+        table.selection_set(first)
+        table.focus(first)
+
+        def restore():
+            selection = table.selection()
+            if not selection:
+                return
+            stamp, dated, usable, is_current, changes = rows[selection[0]]
+            if not usable:
+                messagebox.showerror("Restore Master Jobs Profile", "That dated copy is damaged and cannot be used.", parent=dialog)
+                return
+            if is_current:
+                messagebox.showinfo("Restore Master Jobs Profile", "That version is already your current job profiles.", parent=dialog)
+                return
+            message = (
+                f"Restore your job profiles as they were on {stamp.strftime('%d %B %Y at %H:%M:%S')}?\n\n"
+                f"{changes.replace(' | ', chr(10))}\n\n"
+                "Your current profiles will be kept as a dated copy, so you can undo this."
+            )
+            if getattr(self, "_profile_modified", False):
+                message += "\n\nUnsaved changes to the current job will be lost."
+            if not messagebox.askyesno("Restore Master Jobs Profile", message, icon="warning", parent=dialog):
+                return
+            try:
+                restored = restore_history_copy(target, dated)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Restore Master Jobs Profile", f"The restore did not complete:\n{exc}", parent=dialog)
+                return
+            dialog.destroy()
+            self._apply_replaced_jobs(
+                restored,
+                f"Restored job profiles from the dated copy saved {stamp.strftime('%d %B %Y at %H:%M:%S')} "
+                f"({len(restored)} jobs).",
+            )
+
+        buttons = tk.Frame(dialog, bg="#111827")
+        buttons.pack(fill="x", padx=18, pady=(10, 16))
+        tk.Button(
+            buttons, text="Cancel", command=dialog.destroy,
+            bg="#1f2937", fg="#e2e8f0", activebackground="#334155", activeforeground="#ffffff",
+            relief="flat", font=("Segoe UI", 10, "bold"), padx=12,
+        ).pack(side="right")
+        tk.Button(
+            buttons, text="Restore", command=restore,
+            bg="#38bdf8", fg="#0f172a", activebackground="#7dd3fc",
+            relief="flat", font=("Segoe UI", 10, "bold"), padx=12,
+        ).pack(side="right", padx=(0, 8))
+        tk.Button(
+            buttons, text="Open Folder", command=lambda: os.startfile(history_dir(target)),
+            bg="#1f2937", fg="#e2e8f0", activebackground="#334155", activeforeground="#ffffff",
+            relief="flat", font=("Segoe UI", 10, "bold"), padx=12,
+        ).pack(side="left")
+
+        table.bind("<Double-1>", lambda _event: restore())
+        dialog.bind("<Return>", lambda _event: restore())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        self.restore_dialog = dialog
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_reqwidth()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_reqheight()) // 3)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        table.focus_set()
+
+    def _apply_replaced_jobs(self, jobs, log_message):
+        """Show a newly restored or imported job list, and check the drives it uses."""
+        self.jobs = jobs
+        self._set_profile_modified(False)
+        self.refresh_jobs_list()
+        self._load_initial_job()
+        self._log(log_message, "job_report")
+        # The new jobs may use drives the app was not watching; check them now (alerts if offline).
+        drives = collect_drive_letters(self.jobs)
+        for drive in list(self.known_drive_status):
+            if drive not in drives:
+                del self.known_drive_status[drive]
+        self._update_drive_statuses(drives)
+        self._update_run_button_state()
+
+    def import_job_file_dialog(self):
+        """File > Import Master Jobs Profile: replace the current job profiles with a JOB file from anywhere (e.g. a backup)."""
+        if self._operation_is_running():
+            messagebox.showinfo("Import Master Jobs Profile", "Please wait until the current operation finishes.", parent=self)
+            return
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Import Master Jobs Profile",
+            filetypes=[("EZee-Backup job files", "*.json"), ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+        source = Path(chosen)
+        target = job_file_path()
+        if source.resolve() == target.resolve():
+            messagebox.showinfo("Import Master Jobs Profile", "That file is already your current job file.", parent=self)
+            return
+
+        new_jobs, new_raw, problem = read_jobs_file(source)
+        if new_jobs is None:
+            messagebox.showerror(
+                "Import Master Jobs Profile",
+                f"This file cannot be imported because it is {problem}.\n\n{source}\n\n"
+                "Your current job profiles have not been changed.",
+                parent=self,
+            )
+            return
+        current_jobs, current_raw, _problem = read_jobs_file(target)
+        current_jobs = current_jobs or []
+        if new_raw == current_raw:
+            messagebox.showinfo("Import Master Jobs Profile", "That file is identical to your current job profiles.", parent=self)
+            return
+
+        groups = {str(job.get("group", "")).strip() for job in new_jobs} - {""}
+        message = (
+            f"Import {len(new_jobs)} job profile{'s' if len(new_jobs) != 1 else ''} "
+            f"({len(groups)} group{'s' if len(groups) != 1 else ''}) from:\n{source}\n\n"
+        )
+        if current_jobs:
+            message += (
+                f"This replaces your current {len(current_jobs)} job profile{'s' if len(current_jobs) != 1 else ''}:\n"
+                f"{summarize_job_changes(current_jobs, new_jobs).replace(' | ', chr(10))}\n\n"
+                "Your current profiles will be kept as a dated copy, so you can undo this with "
+                "Edit > Restore Master Jobs Profile from History."
+            )
+        else:
+            message += "You have no job profiles at the moment, so nothing will be replaced."
+        if getattr(self, "_profile_modified", False):
+            message += "\n\nUnsaved changes to the current job will be lost."
+        if not messagebox.askyesno("Import Master Jobs Profile", message, icon="warning" if current_jobs else "question", parent=self):
+            return
+
+        try:
+            imported = import_job_file(target, source)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Import Master Jobs Profile", f"The import did not complete:\n{exc}", parent=self)
+            return
+        self._apply_replaced_jobs(imported, f"Imported {len(imported)} job profiles from {source}.")
+
+    def _report_job_file_recovery(self, notice):
+        log_name = integrity_log_path(job_file_path()).name
+        self._log(f"JOB file problem: {notice}\nDetails are in {log_name}.", "job_report")
+        messagebox.showwarning("JOB File Recovery", f"{notice}\n\nDetails are in {log_name}.", parent=self)
 
     def _mode_changed(self):
         selected = self._selected_sidebar_item()
@@ -1278,7 +2831,8 @@ class EZeeBackupApp(tk.Tk):
             return
         self.jobs.pop(index)
         save_jobs(self.jobs, job_file_path())
-        self.refresh_jobs_list()
+        self.refresh_jobs_list(collapsed=True)
+        self._focus_job_in_sidebar(None)
         self._log(f"Deleted job: {job.get('name', 'Untitled')}")
 
     def load_selected_job(self, index=None):
@@ -1301,7 +2855,16 @@ class EZeeBackupApp(tk.Tk):
         finally:
             self._loading_job = False
         self._set_profile_modified(False)
-        self._log(f"Loaded job: {job.get('name', 'Unnamed')}")
+        self._update_run_button_state()
+        job_label = job.get('name', 'Unnamed')
+        if self._last_selection_offline_drives:
+            drives = ', '.join(self._last_selection_offline_drives)
+            self._log(
+                f"Loaded job: {job_label} - ⚠ Drive {drives} OFFLINE, this profile cannot run.",
+                "job_report",
+            )
+        else:
+            self._log(f"Loaded job: {job_label}")
 
     def add_job_to_group(self, index, x_root=None, y_root=None):
         job = self.jobs[index]
@@ -1310,7 +2873,8 @@ class EZeeBackupApp(tk.Tk):
             return
         job["group"] = group.strip()
         save_jobs(self.jobs, job_file_path())
-        self.refresh_jobs_list()
+        self.refresh_jobs_list(collapsed=True)
+        self._focus_job_in_sidebar(index, job["group"])
         self._log(f"Added job '{job.get('name', 'Untitled')}' to group '{job['group']}'.")
 
     def duplicate_job(self, index):
@@ -1398,7 +2962,9 @@ class EZeeBackupApp(tk.Tk):
             return
         job.pop("group", None)
         save_jobs(self.jobs, job_file_path())
-        self.refresh_jobs_list()
+        # An emptied group drops out of the tree, so everything simply stays closed.
+        self.refresh_jobs_list(collapsed=True)
+        self._focus_job_in_sidebar(None, group)
         self._log(f"Removed job '{job.get('name', 'Untitled')}' from group '{group}'.")
 
     def rename_sidebar_item(self, kind, value):
@@ -1477,6 +3043,7 @@ class EZeeBackupApp(tk.Tk):
         if selected_jobs and not from_queue:
             self.pending_jobs = list(selected_jobs)
             self.batch_job_names = []
+            self.batch_job_results = []
             self._run_next_job()
             return
         self.refresh_folder_views()
@@ -1486,6 +3053,21 @@ class EZeeBackupApp(tk.Tk):
         if not has_valid_folder_pair(source, destination):
             play_error_sound()
             messagebox.showerror("Missing folders", "Please choose a source and destination folder.")
+            return
+
+        accessible, reason = paths_are_accessible(source, destination)
+        if not accessible:
+            play_error_sound()
+            current_name = self.batch_job_names[-1] if self.batch_job_names else self.job_name.get() or "Untitled"
+            self._log(f"ERROR: Skipped job '{current_name}' - {reason}", "job_report")
+            messagebox.showerror("Drive Offline / Path Unavailable", reason, parent=self)
+            if from_queue:
+                self.batch_job_results.append((current_name, reason))
+                if self.pending_jobs:
+                    self.after_idle(self._run_next_job)
+                else:
+                    self._log_job_batch_report()
+                    self.pending_jobs = []
             return
 
         mode = self.mode_var.get()
@@ -1501,6 +3083,21 @@ class EZeeBackupApp(tk.Tk):
             if not confirmed:
                 self._log("Move operation cancelled.")
                 return
+
+        if mode == "twoway":
+            confirmed = messagebox.askyesno(
+                "Confirm Sync Operation",
+                "Sync can delete files on the Source and/or Destination when it detects "
+                "the file was removed on the other side since the last sync.\n\n"
+                "Deleted files are sent to the Recycle Bin, not permanently erased.\n\n"
+                "Do you want to continue?",
+                parent=self,
+            )
+            if not confirmed:
+                self._log("Sync operation cancelled.")
+                return
+            self._launch_sync_job(source, destination, self.include_subfolders_var.get(), log_mode)
+            return
 
         command = build_robocopy_command(
             source,
@@ -1531,6 +3128,7 @@ class EZeeBackupApp(tk.Tk):
             self.process_paused = False
             self.operation_aborted = False
             self._set_operation_controls(True)
+            self._start_destination_auto_refresh()
             output_thread.start()
             self.after(100, lambda: self._poll_process(process, output_thread, output_queue, "Operation complete with exit code {code}."))
         except FileNotFoundError:
@@ -1547,8 +3145,6 @@ class EZeeBackupApp(tk.Tk):
 
 def main():
     app = EZeeBackupApp()
-    splash = SplashScreen(app)
-    app.wait_window(splash)
     app.mainloop()
 
 

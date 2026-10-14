@@ -16,3 +16,12 @@ ezee_backup_jobs.json
 
 # Editor settings
 .vscode/
+
+# Job file safety copies and dated history (created when the app runs)
+*.safety.json
+*_history/
+sync_state/
+
+# Local virtual environment and old development copies
+.venv/
+Early DEV Versions/
