@@ -8,7 +8,7 @@ The app is built for users who want a no-fuss way to back up important folders w
 
 ## Screenshots
 
-![EZee-Backup main window](docs/EZee-Backup-screenshot-1.jpg)
+<img src="docs/EZee-Backup-screenshot-1.jpg" alt="EZee-Backup About screen" width="277">
 
 ![EZee-Backup job management view](docs/EZee-Backup-screenshot-2.jpg)
 
