@@ -1139,7 +1139,8 @@ class EZeeBackupApp(tk.Tk):
         self.minsize(900, 760)
         self.configure(bg="#0b1020")
         try:
-            self.iconbitmap(str(bundled_asset_path("ezee-backup.ico")))
+            # default= also gives every pop-up window (About, dialogs, message boxes) the app icon
+            self.iconbitmap(default=str(bundled_asset_path("ezee-backup.ico")))
         except tk.TclError:
             pass
         self.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -1893,11 +1894,7 @@ class EZeeBackupApp(tk.Tk):
         self.about_window = SplashScreen(self)
 
     def show_coffee(self):
-        win = show_support(self, APP_NAME, reason="It helps keep the app going and improving.")
-        try:
-            win.iconbitmap(str(bundled_asset_path("ezee-backup.ico")))
-        except tk.TclError:
-            pass
+        show_support(self, APP_NAME, reason="It helps keep the app going and improving.")
 
     def _update_job_profile_label(self, *_args):
         name = self.job_name.get().strip() or "Untitled"
